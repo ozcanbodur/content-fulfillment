@@ -1,10 +1,12 @@
 FROM mcr.microsoft.com/playwright:v1.58.2-jammy
 
 WORKDIR /app
-
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package*.json ./
+RUN npm ci --omit=dev
 
 COPY . .
-EXPOSE 3000
-CMD ["npm", "start"]
+ENV NODE_ENV=production
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["npm","start"]
