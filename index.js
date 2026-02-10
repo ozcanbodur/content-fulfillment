@@ -21,10 +21,9 @@ async function launchBrowser() {
 }
 
 async function login(page, username, password) {
-  // 1) Siteye gir
   await page.goto("https://www.mybidfood.com.tr/", { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
 
-  // 2) Login formunu yakala (identity redirect ile de gelebiliyor)
   const pass = page.locator('input[type="password"]').first();
   const user = page.locator('input[type="text"], input[type="email"]').first();
 
@@ -33,30 +32,34 @@ async function login(page, username, password) {
   if (hasLoginForm) {
     await user.fill(username);
     await pass.fill(password);
-
-    // Enter bas (bazı ekranlarda buton yoksa en hızlı yol)
     await pass.press("Enter").catch(() => {});
   }
 
-  // 3) Login sonrası kısa bekleme
+  // SPA/redirect sonrası biraz nefes
   await page.waitForTimeout(1500);
 
-  // heuristics
   const passStillVisible = await pass.isVisible().catch(() => false);
   const currentUrl = page.url();
 
-  // Logout/Çıkış var mı?
-  const logoutLike = page.locator('text=/çıkış|logout|sign out/i');
+  // “logout/çıkış” benzeri bir şey var mı? (toleranslı)
+  const logoutLike = page.locator("text=/çıkış|logout|sign out/i");
   const hasLogout = (await logoutLike.count().catch(() => 0)) > 0;
 
-  // Error var mı?
-  const errorLike = page.locator('text=/hatalı|yanlış|error|invalid/i');
+  // hata mesajı var mı? (toleranslı)
+  const errorLike = page.locator("text=/hatalı|yanlış|error|invalid/i");
   const hasError = (await errorLike.count().catch(() => 0)) > 0;
 
-  // Başarı: login formu vardı ve şimdi password yok -> büyük ihtimal ok
+  // Başarı heuristiği:
   const loggedIn = (!passStillVisible && hasLoginForm) || hasLogout;
 
-  return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
+  return {
+    hasLoginForm,
+    passStillVisible,
+    hasLogout,
+    hasError,
+    currentUrl,
+    loggedIn,
+  };
 }
 
 // ✅ SADECE LOGIN TEST
@@ -65,11 +68,11 @@ app.post("/login-test", async (req, res) => {
 
   const browser = await launchBrowser();
   const page = await browser.newPage();
-  page.setDefaultTimeout(20000);
-  page.setDefaultNavigationTimeout(25000);
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(20000);
 
   try {
-    const result = await withTimeout(login(page, username, password), 30000);
+    const result = await withTimeout(login(page, username, password), 25000);
     res.json({ ok: true, ...result });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
@@ -78,16 +81,9 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ LOGIN + ÜRÜN SAYFASINA GİT + "Ön Sipariş / Sepete Ekle" TIKLA (şimdilik 1 adet)
+// ✅ LOGIN + IT0004 1 ADET EKLE (ön sipariş olsa bile)
 app.post("/add-to-cart", async (req, res) => {
-  const {
-    username,
-    password,
-    productCode = "IT0004",
-    // şimdilik uom/qty opsiyonel; sonraki adımda geliştireceğiz
-    uom, // örn "KOLİ" / "ADET"
-    qty, // örn 1
-  } = req.body;
+  const { username, password, productCode = "IT0004", qty = 1 } = req.body;
 
   const browser = await launchBrowser();
   const page = await browser.newPage();
@@ -114,36 +110,54 @@ app.post("/add-to-cart", async (req, res) => {
 
     await page.goto(productUrl, { waitUntil: "domcontentloaded" });
 
-    // SPA: en kritik nokta -> ürün tbody'si gelene kadar bekle
+    // SPA: ürün tbody’si gelene kadar bekle
     const productTbodySelector = `tbody#product-list-${productCode}`;
     await page.waitForSelector(productTbodySelector, { timeout: 35000 });
 
     const product = page.locator(productTbodySelector).first();
 
-    // "Ön Sipariş / Sepete Ekle" butonu data-cy üzerinden
-    // Not: DOM’da birden fazla UOM satırı olabilir; şimdilik ilk görünen add butonuna tıklıyoruz.
-    const addBtn = product.locator('button[data-cy^="click-set-add-state"]').first();
-
-    // Bazı durumlarda buton render oluyor ama disable/hide olabilir; kısa bir bekleme ile garantiye alalım
+    // Ürün bloğundaki ilk add butonu: "Sepete Ekle" veya "Ön Sipariş" (aynı button)
+    const addBtn = product.locator('button[data-cy="click-set-add-stateprice"]').first();
     await addBtn.waitFor({ state: "visible", timeout: 15000 });
 
+    // 1) İlk tık -> çoğu senaryoda default 1 ekler (ön sipariş dahil)
     await addBtn.click();
 
-    // Sonuç: sayfada sepet sayacı vs. kontrolünü bir sonraki adımda ekleriz.
-    const afterClickUrl = page.url();
+    // 2) Aynı satırdaki qty input’u yakala (varsa)
+    const row = addBtn.locator("xpath=ancestor::tr[1]");
+    const qtyInput = row.locator('input[data-cy="click-input-qty"]').first();
+
+    // Angular bazen click sonrası qty input’u görünür yapıyor; kısa bekleyelim
+    await page.waitForTimeout(800);
+
+    const qtyVisible = await qtyInput.isVisible().catch(() => false);
+
+    let finalQty = null;
+
+    if (qtyVisible) {
+      await qtyInput.click({ clickCount: 3 }).catch(() => {});
+      await qtyInput.fill(String(qty)).catch(() => {});
+      await qtyInput.press("Enter").catch(() => {});
+      await qtyInput.blur().catch(() => {});
+      finalQty = await qtyInput.inputValue().catch(() => null);
+    }
+
+    // Ürün içinde UOM text’i (bilgi amaçlı) - ilk görünen UOM
+    const uomText = await product.locator(".UOM .type").first().innerText().catch(() => null);
 
     res.json({
       ok: true,
       productCode,
+      requestedQty: qty,
+      finalQty,
+      uomDetected: uomText,
       productUrl,
-      afterClickUrl,
+      afterUrl: page.url(),
       note:
-        "Şimdilik ürünün ilk add butonuna tıklandı. UOM/qty seçimini (KOLİ/ADET + adet) bir sonraki adımda DOM’a göre netleştirelim.",
+        "Butona tıklandı (Ön Sipariş/Sepete Ekle). Qty input görünürse 1'e zorlandı. Input görünmezse de UI default 1 eklemiş olabilir.",
     });
   } catch (e) {
-    // Debug için küçük ipuçları
-    const currentUrl = page.url().catch ? await page.url().catch(() => null) : null;
-    res.status(500).json({ ok: false, error: String(e), currentUrl });
+    res.status(500).json({ ok: false, error: String(e), currentUrl: page.url() });
   } finally {
     await browser.close();
   }
