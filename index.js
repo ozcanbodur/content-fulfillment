@@ -13,9 +13,9 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-// ✅ SADECE LOGIN TEST
+// ✅ LOGIN + ÜRÜN SAYFASI TEST (SEPETE EKLEME YOK)
 app.post("/login-test", async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, productCode = "IT0004" } = req.body;
 
   const browser = await chromium.launch({
     headless: true,
@@ -29,52 +29,74 @@ app.post("/login-test", async (req, res) => {
   try {
     const result = await withTimeout(
       (async () => {
+        // 1) Ana siteye git
         await page.goto("https://www.mybidfood.com.tr/", {
           waitUntil: "domcontentloaded",
         });
 
-        // login inputlarını yakala
+        // 2) Login formunu yakala
         const pass = page.locator('input[type="password"]').first();
-        const user = page.locator('input[type="text"], input[type="email"]').first();
+        const user = page
+          .locator('input[type="text"], input[type="email"]')
+          .first();
 
         const hasLoginForm = await pass.isVisible().catch(() => false);
 
+        // 3) Login gerekiyorsa doldur
         if (hasLoginForm) {
           await user.fill(username);
           await pass.fill(password);
-
-          // Enter veya login butonu
           await pass.press("Enter").catch(() => {});
         }
 
-        // login sonrası “bir şey değişti mi?” kontrolü
-        // 1) password input kayboldu mu?
-        await page.waitForTimeout(1500);
+        // 4) Redirect/callback için kısa bekleme
+        await page.waitForTimeout(2000);
 
+        const afterLoginUrl = page.url();
         const passStillVisible = await pass.isVisible().catch(() => false);
 
-        // 2) URL / hash değişti mi?
-        const currentUrl = page.url();
+        // 5) Ürün arama sayfasına git (login gerçekten oturdu mu?)
+        const productUrl =
+          "https://www.mybidfood.com.tr/#/products/search/?searchTerm=" +
+          encodeURIComponent(productCode) +
+          "&category=All&page=1&useUrlParams=true";
 
-        // 3) Sayfada "Logout / Çıkış" benzeri bir şey var mı? (toleranslı)
-        const logoutLike = page.locator('text=/çıkış|logout|sign out/i');
-        const hasLogout = (await logoutLike.count().catch(() => 0)) > 0;
+        await page.goto(productUrl, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(1500);
 
-        // 4) Bir hata mesajı var mı? (toleranslı)
-        const errorLike = page.locator('text=/hatalı|yanlış|error|invalid/i');
+        const afterProductUrl = page.url();
+
+        // Ürün listesi geldi mi?
+        const hasProductList = await page
+          .locator('tbody[id^="product-list-"]')
+          .first()
+          .isVisible()
+          .catch(() => false);
+
+        // Identity’ye geri attı mı?
+        const redirectedToIdentity =
+          /identity\.mybidfood\.com\.tr/i.test(afterProductUrl);
+
+        // Basit hata sinyali
+        const errorLike = page.locator(
+          "text=/hatalı|yanlış|error|invalid/i"
+        );
         const hasError = (await errorLike.count().catch(() => 0)) > 0;
 
-        // Başarı heuristiği:
-        // - login formu vardı ve şimdi password görünmüyor => büyük ihtimal login oldu
-        // - ya da logout benzeri çıktı
-        const loggedIn = (!passStillVisible && hasLoginForm) || hasLogout;
+        // Daha sağlam “logged in” kararı:
+        const loggedIn =
+          (hasLoginForm && !passStillVisible) ||
+          (hasProductList && !redirectedToIdentity);
 
         return {
           hasLoginForm,
           passStillVisible,
-          hasLogout,
+          afterLoginUrl,
+          productUrl,
+          afterProductUrl,
+          hasProductList,
+          redirectedToIdentity,
           hasError,
-          currentUrl,
           loggedIn,
         };
       })(),
