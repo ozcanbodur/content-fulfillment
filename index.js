@@ -7,8 +7,6 @@ app.use(express.json());
 
 app.get("/", (req, res) => res.send("OK"));
 
-const WAIT = 10000; // min 10 sn
-
 function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   return Promise.race([
     promise,
@@ -16,6 +14,43 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
+const WAIT = 10000; // min 10 sn
+
+// --------------------
+// Simple in-memory job store
+// --------------------
+const jobs = new Map();
+/*
+job = {
+  ok: true,
+  jobId,
+  status: 'running' | 'done' | 'error',
+  createdAt,
+  updatedAt,
+  result: any
+}
+*/
+
+function makeJob() {
+  const jobId = crypto.randomBytes(8).toString("hex");
+  const now = Date.now();
+  const job = { ok: true, jobId, status: "running", createdAt: now, updatedAt: now, result: null };
+  jobs.set(jobId, job);
+  return job;
+}
+
+function finishJob(jobId, status, result) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+  job.status = status;
+  job.result = result;
+  job.updatedAt = Date.now();
+  jobs.set(jobId, job);
+}
+
+// --------------------
+// Login helper
+// --------------------
 async function login(page, username, password) {
   await page.goto("https://www.mybidfood.com.tr/", { waitUntil: "domcontentloaded" });
 
@@ -46,108 +81,79 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
-/**
- * Qty set et, DUR (sepete ekleme yok)
- * - Plus tıklayarak artırır, her tık sonrası WAIT kadar bekler.
- * - Hedefe gelince döner.
- */
-async function setQtyOnlyFlow(page, { username, password, productCode, targetQty }) {
-  const sleep = (ms) => page.waitForTimeout(ms);
+// --------------------
+// Find product row robustly
+// --------------------
+async function findProductRow(page, productCode) {
+  // 1) direct id
+  const direct = page.locator(`#product-list-${productCode}`).first();
+  if ((await direct.count().catch(() => 0)) > 0) return direct;
 
-  const loginResult = await withTimeout(login(page, username, password), 35000);
-  if (!loginResult.loggedIn) {
-    return { ok: false, status: 401, step: "login", ...loginResult };
-  }
-
-  const productUrl = `https://www.mybidfood.com.tr/#/products/search/?searchTerm=${encodeURIComponent(
-    productCode
-  )}&category=All&page=1&useUrlParams=true`;
-
-  await page.goto(productUrl, { waitUntil: "domcontentloaded" });
-  await sleep(1500);
-
-  const row = page.locator(`#product-list-${productCode}`).first();
-  if ((await row.count()) === 0) {
-    return { ok: false, status: 404, error: `Ürün bloğu yok: ${productCode}`, productUrl };
-  }
-
-  const scopeHandle = await row.evaluateHandle((tbody) => {
-    const all = Array.from(tbody.querySelectorAll("*"));
-    const adetHint = all.find((el) => /Birim:\s*ADET/i.test(el.innerText || ""));
-    if (!adetHint) return null;
-    return adetHint.closest("tbody") || tbody;
-  });
-
-  const scopeEl = scopeHandle?.asElement();
-  if (!scopeEl) {
-    return { ok: false, status: 404, error: "ADET satırı bulunamadı.", productUrl };
-  }
-
-  const q = async (selector) => {
-    const h = await scopeEl.evaluateHandle((root, sel) => root.querySelector(sel), selector);
-    return h?.asElement() || null;
-  };
-
-  const readQty = async () => {
-    const inp = await q('input[data-cy="click-input-qty"]');
-    if (!inp) return null;
-    const val = await inp.evaluate((n) => parseInt(n.value || "0", 10));
-    return Number.isFinite(val) ? val : null;
-  };
-
-  const clickPlus = async () => {
-    const plus = await q('button[data-cy="click-increase-qtyprice"]');
-    if (!plus) throw new Error("Plus yok");
-    await plus.click({ force: true });
-  };
-
-  // Hedefe gidene kadar kontrollü artır
-  const maxAttempts = Math.max(20, targetQty * 10);
-  let attempts = 0;
-
-  while (attempts++ < maxAttempts) {
-    const cur = await readQty();
-    if (cur === null) {
-      await sleep(1000);
-      continue;
+  // 2) fallback: search within all product-list tbody and match by product code label
+  const all = page.locator('tbody[id^="product-list-"]');
+  const count = await all.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const candidate = all.nth(i);
+    const codeEl = candidate.locator('[data-cy="product-code"]').first();
+    const text = await codeEl.textContent().catch(() => "");
+    if ((text || "").trim().toUpperCase() === String(productCode).trim().toUpperCase()) {
+      return candidate;
     }
-    if (cur >= targetQty) {
-      return {
-        ok: true,
-        productCode,
-        targetQty,
-        finalQty: cur,
-        productUrl,
-        note: "✅ Hedef qty oldu, duruyorum. (Sepete ekleme yok.)",
-      };
-    }
-
-    await clickPlus();
-    await sleep(WAIT);
   }
 
-  return {
-    ok: false,
-    status: 500,
-    error: "Hedef qty'ye ulaşılamadı (UI lag/reset olabilir).",
-    productCode,
-    targetQty,
-    finalQty: await readQty(),
-    productUrl,
-  };
+  return null;
 }
 
 // --------------------
-// JOB SİSTEMİ (timeout çözümü)
+// Scope finder by UOM inside product row
 // --------------------
-const jobs = new Map(); // jobId -> {status, createdAt, updatedAt, result/error}
+async function getScopeHandleByUom(rowLocator, uom) {
+  // rowLocator is locator of the product's tbody
+  const rowHandle = await rowLocator.elementHandle();
+  if (!rowHandle) return null;
 
-function newJobId() {
-  return crypto.randomBytes(8).toString("hex");
+  const scopeHandle = await rowHandle.evaluateHandle((tbody, uomText) => {
+    const wanted = String(uomText || "").trim().toUpperCase();
+
+    // find ".UOM .type" node matching wanted
+    const uomNodes = Array.from(tbody.querySelectorAll(".UOM .type"));
+    const match = uomNodes.find((el) => (el.textContent || "").trim().toUpperCase() === wanted);
+    if (!match) return null;
+
+    // walk to nearest TR around this UOM
+    const tr = match.closest("tr");
+    if (!tr) return tbody;
+
+    // sometimes controls are not in the same tr; scan current + next siblings
+    let cur = tr;
+    for (let i = 0; i < 8; i++) {
+      if (!cur) break;
+
+      const hasCtl =
+        cur.querySelector('[data-cy="click-set-add-stateprice"]') ||
+        cur.querySelector('[data-cy="click-increase-qtyprice"]') ||
+        cur.querySelector('[data-cy="click-decrease-qtyprice"]') ||
+        cur.querySelector('[data-cy="click-input-qty"]');
+
+      if (hasCtl) return cur;
+
+      cur = cur.nextElementSibling;
+    }
+
+    // fallback
+    return tbody;
+  }, uom);
+
+  return scopeHandle?.asElement() ? scopeHandle : null;
 }
 
-async function runSetQtyJob(jobId, payload) {
-  jobs.set(jobId, { status: "running", createdAt: Date.now(), updatedAt: Date.now() });
+// --------------------
+// Endpoints
+// --------------------
+
+// ✅ SADECE LOGIN TEST
+app.post("/login-test", async (req, res) => {
+  const { username, password } = req.body;
 
   const browser = await chromium.launch({
     headless: true,
@@ -159,88 +165,152 @@ async function runSetQtyJob(jobId, payload) {
   page.setDefaultNavigationTimeout(30000);
 
   try {
-    // Uzun sürebilir: targetQty 9 => ~80s + login + load
-    const result = await withTimeout(
-      setQtyOnlyFlow(page, payload),
-      5 * 60 * 1000, // 5 dk job timeout
-      "SET_QTY_JOB_TIMEOUT"
-    );
-
-    jobs.set(jobId, {
-      status: result.ok ? "done" : "error",
-      createdAt: jobs.get(jobId).createdAt,
-      updatedAt: Date.now(),
-      result,
-    });
-  } catch (e) {
-    jobs.set(jobId, {
-      status: "error",
-      createdAt: jobs.get(jobId).createdAt,
-      updatedAt: Date.now(),
-      result: { ok: false, error: String(e) },
-    });
-  } finally {
-    await browser.close();
-  }
-}
-
-// ✅ JOB BAŞLAT: HEMEN DÖNER (502 olmaz)
-app.post("/set-qty", async (req, res) => {
-  const { username, password, productCode, targetQty = 5 } = req.body;
-  if (!username || !password || !productCode) {
-    return res.status(400).json({ ok: false, error: "username, password, productCode zorunlu" });
-  }
-
-  const jobId = newJobId();
-  jobs.set(jobId, { status: "queued", createdAt: Date.now(), updatedAt: Date.now() });
-
-  // Arkada çalıştır
-  runSetQtyJob(jobId, { username, password, productCode, targetQty });
-
-  return res.json({
-    ok: true,
-    jobId,
-    statusUrl: `/job/${jobId}`,
-    note: "Job başlatıldı. Sonucu GET /job/:id ile sorgula.",
-  });
-});
-
-// ✅ JOB DURUMU / SONUÇ
-app.get("/job/:id", (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ ok: false, error: "Job bulunamadı" });
-
-  return res.json({
-    ok: true,
-    jobId: req.params.id,
-    status: job.status,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    result: job.result || null,
-  });
-});
-
-// ✅ LOGIN TEST
-app.post("/login-test", async (req, res) => {
-  const { username, password } = req.body;
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
-  const page = await browser.newPage();
-  page.setDefaultTimeout(15000);
-  page.setDefaultNavigationTimeout(20000);
-
-  try {
-    const result = await withTimeout(login(page, username, password), 25000);
+    const result = await withTimeout(login(page, username, password), 35000);
     res.json({ ok: true, ...result });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   } finally {
     await browser.close();
   }
+});
+
+// ✅ SET QTY (job) - sadece qty ayarla, DUR
+app.post("/set-qty", async (req, res) => {
+  const job = makeJob();
+
+  // hızlı yanıt
+  res.json({
+    ok: true,
+    jobId: job.jobId,
+    statusUrl: `/job/${job.jobId}`,
+    note: "Job başlatıldı. Sonucu GET /job/:id ile sorgula.",
+  });
+
+  // job async run
+  (async () => {
+    const { username, password, productCode, targetQty = 5 } = req.body;
+    const uom = (req.body.uom || "ADET").toString().toUpperCase().trim();
+
+    const browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage();
+    page.setDefaultTimeout(30000);
+    page.setDefaultNavigationTimeout(45000);
+
+    const sleep = (ms) => page.waitForTimeout(ms);
+
+    try {
+      // 1) login
+      const loginResult = await withTimeout(login(page, username, password), 45000);
+      if (!loginResult.loggedIn) {
+        finishJob(job.jobId, "error", { ok: false, step: "login", status: 401, ...loginResult });
+        return;
+      }
+
+      // 2) go product search
+      const productUrl = `https://www.mybidfood.com.tr/#/products/search/?searchTerm=${encodeURIComponent(
+        productCode
+      )}&category=All&page=1&useUrlParams=true`;
+
+      await page.goto(productUrl, { waitUntil: "domcontentloaded" });
+      await sleep(1500);
+
+      // 3) find product row robustly
+      const row = await findProductRow(page, productCode);
+      if (!row) {
+        finishJob(job.jobId, "error", {
+          ok: false,
+          status: 404,
+          error: `Ürün bloğu yok: ${productCode}`,
+          productUrl,
+        });
+        return;
+      }
+
+      // 4) scope by uom
+      const scopeHandle = await getScopeHandleByUom(row, uom);
+      if (!scopeHandle) {
+        finishJob(job.jobId, "error", {
+          ok: false,
+          status: 404,
+          error: `UOM bulunamadı: ${uom} (ürün: ${productCode})`,
+          productUrl,
+        });
+        return;
+      }
+
+      // helper: query within scope (DOM)
+      const q = async (selector) => {
+        const h = await scopeHandle.evaluateHandle((root, sel) => root.querySelector(sel), selector);
+        return h.asElement();
+      };
+
+      const readQty = async () => {
+        const inp = await q('input[data-cy="click-input-qty"]');
+        if (!inp) return null;
+        const v = await inp.evaluate((n) => parseInt(n.value || "0", 10));
+        return Number.isFinite(v) ? v : null;
+      };
+
+      const clickMinus = async () => {
+        const minus = await q('button[data-cy="click-decrease-qtyprice"]');
+        if (!minus) return false;
+        await minus.click({ force: true });
+        return true;
+      };
+
+      const clickPlus = async () => {
+        const plus = await q('button[data-cy="click-increase-qtyprice"]');
+        if (!plus) throw new Error("Plus yok (scope içinde)");
+        await plus.click({ force: true });
+      };
+
+      // 5) ensure start from 1 (stabilize)
+      let safety = 25;
+      while (safety-- > 0) {
+        const cur = await readQty();
+        if (cur === null || cur <= 1) break;
+        const ok = await clickMinus();
+        if (!ok) break;
+        await sleep(WAIT);
+      }
+
+      // 6) increase to target
+      for (let i = 0; i < Math.max(0, targetQty - 1); i++) {
+        await clickPlus();
+        await sleep(WAIT);
+      }
+
+      const finalQty = await readQty();
+
+      // ✅ DUR: sepete ekleme yok
+      finishJob(job.jobId, "done", {
+        ok: true,
+        productCode,
+        uom,
+        targetQty,
+        finalQty,
+        productUrl,
+        note: "Qty hedefe getirildi, sepete ekleme yapılmadı.",
+      });
+    } catch (e) {
+      finishJob(job.jobId, "error", { ok: false, status: 500, error: String(e) });
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  })().catch((e) => {
+    finishJob(job.jobId, "error", { ok: false, status: 500, error: String(e) });
+  });
+});
+
+// ✅ JOB STATUS
+app.get("/job/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ ok: false, status: 404, error: "Job not found" });
+  res.json(job);
 });
 
 const PORT = process.env.PORT || 3000;
