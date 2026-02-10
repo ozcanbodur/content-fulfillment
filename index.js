@@ -13,7 +13,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT = 10000; // min 10 sn
+const WAIT = 10000; // min 10 sn (her artıştan sonra)
 
 async function login(page, username, password) {
   await page.goto("https://www.mybidfood.com.tr/", { waitUntil: "domcontentloaded" });
@@ -68,6 +68,114 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
+/**
+ * Qty set et, DUR (sepete ekleme yok)
+ * - targetQty olunca response döner.
+ * - min 10 sn bekleme var.
+ * - UI lag / reset durumuna retry ile dayanıklı.
+ */
+async function setQtyOnlyFlow(page, { username, password, productCode, targetQty }) {
+  const sleep = (ms) => page.waitForTimeout(ms);
+
+  const loginResult = await withTimeout(login(page, username, password), 35000);
+  if (!loginResult.loggedIn) {
+    return { ok: false, status: 401, step: "login", ...loginResult };
+  }
+
+  const productUrl = `https://www.mybidfood.com.tr/#/products/search/?searchTerm=${encodeURIComponent(
+    productCode
+  )}&category=All&page=1&useUrlParams=true`;
+
+  await page.goto(productUrl, { waitUntil: "domcontentloaded" });
+  await sleep(1500);
+
+  // product container
+  const row = page.locator(`#product-list-${productCode}`).first();
+  const rowCount = await row.count();
+  if (!rowCount) {
+    return { ok: false, status: 404, error: `Ürün bloğu yok: ${productCode}`, productUrl };
+  }
+
+  // ADET scope root'unu bul (aynı ürün tbody içinde ADET satırının olduğu kısım)
+  const scopeHandle = await row.evaluateHandle((tbody) => {
+    const all = Array.from(tbody.querySelectorAll("*"));
+    const adetHint = all.find((el) => /Birim:\s*ADET/i.test(el.innerText || ""));
+    if (!adetHint) return null;
+    return adetHint.closest("tbody") || tbody;
+  });
+
+  const scopeEl = scopeHandle?.asElement();
+  if (!scopeEl) {
+    return { ok: false, status: 404, error: "ADET satırı bulunamadı.", productUrl };
+  }
+
+  // scope içinde selector bulucu
+  const q = async (selector) => {
+    const h = await scopeEl.evaluateHandle((root, sel) => root.querySelector(sel), selector);
+    return h?.asElement() || null;
+  };
+
+  // qty okuma: input value (asıl kaynak)
+  const readQty = async () => {
+    const inp = await q('input[data-cy="click-input-qty"]');
+    if (!inp) return null;
+    const val = await inp.evaluate((n) => parseInt(n.value || "0", 10));
+    return Number.isFinite(val) ? val : null;
+  };
+
+  const clickPlus = async () => {
+    const plus = await q('button[data-cy="click-increase-qtyprice"]');
+    if (!plus) throw new Error("Plus yok");
+    await plus.click({ force: true });
+  };
+
+  // UI bazen 1 geriden/geri düşebiliyor => hedefe ulaşana kadar kontrollü ilerle
+  // maxAttempts: sonsuz döngü olmasın
+  const maxAttempts = Math.max(10, targetQty * 6);
+  let attempts = 0;
+
+  while (attempts++ < maxAttempts) {
+    const cur = await readQty();
+    // bazen ilk anda 0/null gelebiliyor; biraz bekleyip tekrar dene
+    if (cur === null) {
+      await sleep(1000);
+      continue;
+    }
+
+    // hedefteyiz => DUR
+    if (cur >= targetQty) {
+      return {
+        ok: true,
+        productCode,
+        targetQty,
+        finalQty: cur,
+        productUrl,
+        note: "✅ Hedef qty oldu, duruyorum. (Sepete ekleme yapılmadı.)",
+      };
+    }
+
+    // 1 arttır
+    await clickPlus();
+    await sleep(WAIT);
+
+    const after = await readQty();
+    // Debug amaçlı: UI lag / reset görürsen buradan anlayacaksın
+    // console.log("ui qty =", after);
+  }
+
+  // buraya geldiyse hedefe ulaşamadı
+  const last = await readQty();
+  return {
+    ok: false,
+    status: 500,
+    error: "Hedef qty'ye ulaşılamadı (UI lag/reset olabilir).",
+    productCode,
+    targetQty,
+    finalQty: last,
+    productUrl,
+  };
+}
+
 // ✅ Qty set et, DUR (sepete ekleme yok)
 app.post("/set-qty-only", async (req, res) => {
   const { username, password, productCode, targetQty = 5 } = req.body;
@@ -81,89 +189,28 @@ app.post("/set-qty-only", async (req, res) => {
   page.setDefaultTimeout(20000);
   page.setDefaultNavigationTimeout(30000);
 
-  const sleep = (ms) => page.waitForTimeout(ms);
-
   try {
-    const loginResult = await withTimeout(login(page, username, password), 35000);
-    if (!loginResult.loggedIn) {
-      return res.status(401).json({ ok: false, step: "login", ...loginResult });
-    }
+    const result = await withTimeout(
+      setQtyOnlyFlow(page, { username, password, productCode, targetQty }),
+      120000,
+      "SET_QTY_TIMEOUT"
+    );
 
-    const productUrl = `https://www.mybidfood.com.tr/#/products/search/?searchTerm=${encodeURIComponent(
-      productCode
-    )}&category=All&page=1&useUrlParams=true`;
-
-    await page.goto(productUrl, { waitUntil: "domcontentloaded" });
-    await sleep(1500);
-
-    // product container
-    const row = page.locator(`#product-list-${productCode}`).first();
-    const rowCount = await row.count();
-    if (!rowCount) {
-      return res.status(404).json({ ok: false, error: `Ürün bloğu yok: ${productCode}`, productUrl });
-    }
-
-    // ADET satırı: "Birim: ADET" geçen elementi bul (DOM içinde text arama)
-    // Playwright'ta DOM içinden evaluate ile aramak daha stabil:
-    const scopeHandle = await row.evaluateHandle((tbody) => {
-      // row = tbody
-      // ADET hint bul
-      const all = Array.from(tbody.querySelectorAll("*"));
-      const adetHint = all.find((el) => /Birim:\s*ADET/i.test(el.innerText || ""));
-      if (!adetHint) return null;
-      return adetHint.closest("tbody") || tbody;
-    });
-
-    if (!scopeHandle) {
-      return res.status(404).json({ ok: false, error: "ADET satırı bulunamadı.", productUrl });
-    }
-
-    const getInput = () => page.locator('input[data-cy="click-input-qty"]').filter({ has: page.locator(":scope") });
-    // Yukarıdaki filter scope vermiyor; scopeHandle ile querySelector kullanacağız:
-    const q = async (selector) => {
-      const el = await scopeHandle.evaluateHandle((root, sel) => root.querySelector(sel), selector);
-      const asEl = el.asElement();
-      return asEl;
-    };
-
-    const readQty = async () => {
-      const inp = await q('input[data-cy="click-input-qty"]');
-      if (!inp) return null;
-      const val = await inp.evaluate((n) => parseInt(n.value || "0", 10));
-      return Number.isFinite(val) ? val : null;
-    };
-
-    const clickPlus = async () => {
-      const plus = await q('button[data-cy="click-increase-qtyprice"]');
-      if (!plus) throw new Error("Plus yok");
-      await plus.click({ force: true });
-    };
-
-    // Hedef qty’ye getir (min 10 sn bekle)
-    for (let i = 0; i < Math.max(0, targetQty - 1); i++) {
-      await clickPlus();
-      await sleep(WAIT);
-      const cur = await readQty();
-      // log amaçlı
-      // console.log("ui qty =", cur);
-    }
-
-    const finalQty = await readQty();
-
-    // Burada DURUYORUZ — sepete ekleme yok
-    return res.json({
-      ok: true,
-      productCode,
-      targetQty,
-      finalQty,
-      productUrl,
-      note: "Qty hedefe getirildi, sepete ekleme yapılmadı.",
-    });
+    if (result?.ok) return res.json(result);
+    const status = result?.status || 500;
+    return res.status(status).json(result);
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   } finally {
     await browser.close();
   }
+});
+
+// ✅ ALIAS: sen curl ile /set-qty çağırıyorsun diye (Cannot POST fix)
+app.post("/set-qty", async (req, res) => {
+  // aynen /set-qty-only gibi çalışır
+  req.url = "/set-qty-only";
+  return app._router.handle(req, res);
 });
 
 const PORT = process.env.PORT || 3000;
