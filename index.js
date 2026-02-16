@@ -13,7 +13,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT = 10000; // min 10 sn
+const WAIT = 10000; // min 10 sn (qty artır/azalt sonrası bekleme)
 
 async function sleep(page, ms) {
   await page.waitForTimeout(ms);
@@ -63,7 +63,7 @@ async function gotoProductSearch(page, productCode) {
   // SPA render + ürün listesi için min bekleme
   await sleep(page, 1500);
 
-  // ürün tbody görünene kadar bekle (bazen 1-2 render daha oluyor)
+  // ürün tbody görünene kadar bekle
   const rowSel = `#product-list-${productCode}`;
   await page.waitForSelector(rowSel, { timeout: 60000 }).catch(() => null);
 
@@ -109,7 +109,7 @@ async function addOneItem(page, item) {
     };
   }
 
-  // İstenen UOM satırının TR scope’u: row içinde ".UOM .type" == ADET/KOLİ olanı bul, closest("tr")
+  // İstenen UOM satırının TR scope’u
   const scopeHandle = await row.evaluateHandle((tbody, uomUpper) => {
     const typeEls = Array.from(tbody.querySelectorAll(".UOM .type"));
     const match = typeEls.find((el) => (el.textContent || "").trim().toUpperCase() === uomUpper);
@@ -149,7 +149,7 @@ async function addOneItem(page, item) {
   await addBtn.click({ force: true });
   await sleep(page, WAIT);
 
-  // input görünür değilse biraz daha bekle (Angular bazen hide->show geçişi gecikiyor)
+  // input görünür değilse biraz daha bekle
   let cur = await readQty();
   if (cur === null) {
     await sleep(page, WAIT);
@@ -171,12 +171,11 @@ async function addOneItem(page, item) {
   let guard = 160;
   while (guard-- > 0) {
     const now = await readQty();
-    // console.log("ui qty =", now);
 
     if (now === qtyWanted) break;
 
     if (now === null) {
-      // input kaybolduysa tekrar "Ekle" tıkla (UI bazen collapse edebiliyor)
+      // input kaybolduysa tekrar "Ekle" tıkla
       await addBtn.click({ force: true }).catch(() => {});
       await sleep(page, WAIT);
       continue;
@@ -190,7 +189,7 @@ async function addOneItem(page, item) {
       continue;
     }
 
-    // now > qtyWanted (nadiren)
+    // now > qtyWanted
     const minus = await getMinus();
     if (!minus) return { ok: false, status: 500, productCode, uom: uomWanted, error: "Minus yok", availableUoms, productUrl };
     await minus.click({ force: true });
@@ -207,6 +206,78 @@ async function addOneItem(page, item) {
     finalQty,
     productUrl,
     note: "Akış: login -> search -> UOM satırı seçildi -> Ekle ile qty alanı açıldı -> +/- ile hedef qty'ye gelince durdu.",
+  };
+}
+
+/**
+ * ✅ Checkout / Delivery adımı:
+ * - https://www.mybidfood.com.tr/#/checkout/delivery 'e gider
+ * - 10sn bekler
+ * - orderreference input'a ORDER_REF yazar
+ * - delivery-date-dropdown'dan DELIVERY_DATE_TEXT içeren tarihi seçer
+ */
+async function completeCheckoutDelivery(page, { orderRef, deliveryDateText }) {
+  const DELIVERY_URL = "https://www.mybidfood.com.tr/#/checkout/delivery";
+  const ORDER_REF = String(orderRef || "").trim();
+  const DELIVERY_DATE_TEXT = String(deliveryDateText || "").trim();
+
+  if (!ORDER_REF) return { ok: false, error: "orderRef zorunlu (örn: 39-1221429)" };
+  if (!DELIVERY_DATE_TEXT) return { ok: false, error: "deliveryDateText zorunlu (örn: 21 Şubat 2026)" };
+
+  await page.goto(DELIVERY_URL, { waitUntil: "domcontentloaded" });
+
+  // Angular sayfanın oturması için 10sn
+  await sleep(page, 10000);
+
+  // 1) Sipariş referansı
+  const ref = page.locator('input[name="orderreference"]').first();
+  await ref.waitFor({ state: "visible", timeout: 60000 });
+
+  await ref.click({ force: true });
+  // fill() Angular input eventlerini tetikler, en stabil yöntem
+  await ref.fill(ORDER_REF);
+  // blur/commit
+  await page.keyboard.press("Tab").catch(() => {});
+  await sleep(page, 300);
+
+  // 2) Dropdown aç ve tarih seç
+  const ddBtn = page.locator('[data-cy="delivery-date-dropdown"]').first();
+  await ddBtn.waitFor({ state: "visible", timeout: 60000 });
+
+  await ddBtn.click({ force: true });
+  await sleep(page, 400);
+
+  const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
+  await menu.waitFor({ state: "visible", timeout: 60000 });
+
+  const hitLi = menu.locator("li", { hasText: DELIVERY_DATE_TEXT }).first();
+
+  if ((await hitLi.count()) === 0) {
+    // debug için mevcut seçenekler
+    const options = await menu.locator("li").allTextContents().catch(() => []);
+    return {
+      ok: false,
+      status: 404,
+      error: `Tarih bulunamadı: ${DELIVERY_DATE_TEXT}`,
+      availableDates: options.map((t) => (t || "").trim()).filter(Boolean),
+      url: DELIVERY_URL,
+    };
+  }
+
+  await hitLi.scrollIntoViewIfNeeded().catch(() => {});
+  await hitLi.click({ force: true });
+  await sleep(page, 600);
+
+  // doğrulama amaçlı buton text
+  const afterText = (await ddBtn.innerText().catch(() => "")).trim();
+
+  return {
+    ok: true,
+    url: DELIVERY_URL,
+    orderRef: ORDER_REF,
+    deliveryDateText: DELIVERY_DATE_TEXT,
+    dropdownTextAfter: afterText,
+    note: "Akış: checkout/delivery -> 10sn bekle -> Sipariş Referansı yaz -> Sevk Tarihi seç.",
   };
 }
 
@@ -233,9 +304,9 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ TEK ÜRÜN: add-to-cart
+// ✅ TEK ÜRÜN: add-to-cart (+ opsiyonel checkout/delivery)
 app.post("/add-to-cart", async (req, res) => {
-  const { username, password, productCode, uom, qty } = req.body || {};
+  const { username, password, productCode, uom, qty, orderRef, deliveryDateText } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
   if (!productCode || !uom) return res.status(400).json({ ok: false, error: "productCode/uom zorunlu" });
@@ -253,14 +324,26 @@ app.post("/add-to-cart", async (req, res) => {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
 
-    const result = await withTimeout(
+    const itemResult = await withTimeout(
       addOneItem(page, { productCode, uom, qty }),
       180000,
       "ADD_TO_CART_TIMEOUT"
     );
 
-    // result.ok false ise yine 200 dönüyorum ki client rahat parse etsin
-    return res.json(result);
+    let checkoutResult = null;
+    if (orderRef && deliveryDateText) {
+      checkoutResult = await withTimeout(
+        completeCheckoutDelivery(page, { orderRef, deliveryDateText }),
+        180000,
+        "CHECKOUT_DELIVERY_TIMEOUT"
+      );
+    }
+
+    return res.json({
+      ok: itemResult.ok && (!checkoutResult || checkoutResult.ok),
+      item: itemResult,
+      checkout: checkoutResult,
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
@@ -268,9 +351,9 @@ app.post("/add-to-cart", async (req, res) => {
   }
 });
 
-// ✅ ÇOKLU ÜRÜN: batch
+// ✅ ÇOKLU ÜRÜN: batch (+ opsiyonel checkout/delivery)
 app.post("/add-to-cart-batch", async (req, res) => {
-  const { username, password, items, stopOnError = true } = req.body || {};
+  const { username, password, items, stopOnError = true, orderRef, deliveryDateText } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ ok: false, error: "items[] zorunlu" });
@@ -305,7 +388,24 @@ app.post("/add-to-cart-batch", async (req, res) => {
       failed: results.filter((r) => !r.ok).length,
     };
 
-    return res.json({ ok: summary.failed === 0 || !stopOnError, summary, results });
+    let checkoutResult = null;
+    if (orderRef && deliveryDateText) {
+      checkoutResult = await withTimeout(
+        completeCheckoutDelivery(page, { orderRef, deliveryDateText }),
+        180000,
+        "CHECKOUT_DELIVERY_TIMEOUT"
+      );
+    }
+
+    const overallOk =
+      (summary.failed === 0 || !stopOnError) && (!checkoutResult || checkoutResult.ok);
+
+    return res.json({
+      ok: overallOk,
+      summary,
+      results,
+      checkout: checkoutResult,
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
