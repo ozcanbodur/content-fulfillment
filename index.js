@@ -50,12 +50,6 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
-/**
- * Ürün search sayfasında ilgili productCode satırını bulur,
- * uom satırını seçer (ADET/KOLİ),
- * önce Ekle ile qty alanını açar,
- * sonra +/- ile hedef qty'ye gelince DURUR.
- */
 async function addOneItem(page, item) {
   const { productCode, uom, qty } = item || {};
   const requestedQty = Number(qty ?? 1);
@@ -73,7 +67,6 @@ async function addOneItem(page, item) {
 
   await page.goto(productUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, 2000);
-  // SPA bazen geç çiziyor
   await sleep(page, WAIT_STEP_MS);
 
   const row = page.locator(`#product-list-${productCode}`).first();
@@ -81,14 +74,12 @@ async function addOneItem(page, item) {
     return { ok: false, status: 404, productCode, uom, error: `Ürün bloğu yok: ${productCode}`, productUrl };
   }
 
-  // UOM satırını (tr) net yakala: row içinde .UOM .type == uom
   const uomUpper = String(uom).trim().toUpperCase();
   const uomType = row.locator(".UOM .type").filter({
     hasText: uomUpper,
   }).first();
 
   if ((await uomType.count()) === 0) {
-    // mevcut UOM listesi dönelim
     const availableUoms = await row.locator(".UOM .type").allTextContents().catch(() => []);
     return {
       ok: false,
@@ -101,7 +92,6 @@ async function addOneItem(page, item) {
     };
   }
 
-  // uomType'ın bulunduğu tr
   const scope = uomType.locator("xpath=ancestor::tr[1]").first();
 
   const addBtn = scope.locator('button[data-cy="click-set-add-stateprice"]').first();
@@ -109,16 +99,13 @@ async function addOneItem(page, item) {
   const minusBtn = scope.locator('button[data-cy="click-decrease-qtyprice"]').first();
   const qtyInput = scope.locator('input[data-cy="click-input-qty"]').first();
 
-  // Önce "Ekle" ile qty alanını aç
   if ((await addBtn.count()) > 0) {
-    // buton görünmezse force ile scroll + click
     await addBtn.scrollIntoViewIfNeeded().catch(() => {});
     await addBtn.click({ force: true }).catch(() => {});
     await sleep(page, 500);
     await sleep(page, WAIT_STEP_MS);
   }
 
-  // qty input görünür olana kadar bekle (ama hidden kalabiliyor; bu yüzden visible yerine attached + enabled check)
   await qtyInput.waitFor({ state: "attached", timeout: 60000 }).catch(() => {});
 
   const readQty = async () => {
@@ -127,7 +114,6 @@ async function addOneItem(page, item) {
     return Number.isFinite(n) ? n : null;
   };
 
-  // Güvenli başlangıç: 1'e indir
   let safety = 40;
   while (safety-- > 0) {
     const cur = await readQty();
@@ -137,7 +123,6 @@ async function addOneItem(page, item) {
     await sleep(page, WAIT_STEP_MS);
   }
 
-  // hedefe çık: hedefe gelince DUR
   let guard = 80;
   while (guard-- > 0) {
     const cur = await readQty();
@@ -153,7 +138,6 @@ async function addOneItem(page, item) {
       await sleep(page, WAIT_STEP_MS);
       continue;
     }
-    // cur > requestedQty ise azalt
     if ((await minusBtn.count()) === 0) {
       return { ok: false, status: 500, productCode, uom: uomUpper, error: "Minus yok", productUrl };
     }
@@ -187,11 +171,6 @@ async function addOneItem(page, item) {
   };
 }
 
-/**
- * Sepet sonrası: checkout/delivery sayfasına gider,
- * order ref yazar, teslim tarihini seçer, submit tıklar,
- * confirmation ekranını görünce submitted=true döner.
- */
 async function checkoutDelivery(page, params) {
   const {
     orderRef,
@@ -214,7 +193,6 @@ async function checkoutDelivery(page, params) {
     confirmationUrl: null,
   };
 
-  // Direkt delivery sayfasına git
   await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, waitBefore);
 
@@ -251,7 +229,7 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 500);
   }
 
-  // 2) teslim tarihi seç - ✅ YENİ VERSİYON
+  // 2) teslim tarihi seç
   if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
     const btn = page.locator('[data-cy="delivery-date-dropdown"]').first();
     await btn.waitFor({ state: "attached", timeout: 60000 });
@@ -263,26 +241,16 @@ async function checkoutDelivery(page, params) {
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
     await menu.waitFor({ state: "attached", timeout: 60000 });
 
-    // ✅ YENİ: Önce tüm seçenekleri al
     const allOptions = await menu.locator("li").allTextContents().catch(() => []);
-    console.log("📅 Mevcut tarih seçenekleri:", allOptions);
 
     const wanted = String(deliveryDateText).trim();
-    
-    // ✅ YENI: Hem tam eşleşme hem de partial eşleşme dene
     let hitLi = menu.locator("li").filter({ hasText: wanted }).first();
     
     if ((await hitLi.count()) === 0) {
-      // Tam eşleşme yoksa, partial dene
-      console.log("📅 Tam eşleşme yok, partial deneniyor...");
-      
-      // Sadece sayı kısmını al (18 Şubat 2026 -> 18)
       const dayMatch = wanted.match(/(\d+)/);
       if (dayMatch) {
         const day = dayMatch[1];
-        // İlk bulunanı al
         hitLi = menu.locator("li").filter({ hasText: day }).first();
-        console.log("📅 Gün ile arama:", day);
       }
     }
 
@@ -297,16 +265,14 @@ async function checkoutDelivery(page, params) {
     }
 
     const selectedText = await hitLi.textContent().catch(() => "");
-    console.log("📅 Seçilen tarih:", selectedText);
 
     await hitLi.scrollIntoViewIfNeeded().catch(() => {});
     await hitLi.click({ force: true }).catch(() => {});
     await sleep(page, 800);
 
     result.deliveryDateSelected = true;
-    result.selectedDateText = selectedText; // ✅ Debug için
+    result.selectedDateText = selectedText;
     
-    // Form validation trigger
     await page.evaluate(() => {
       try {
         const inputs = document.querySelectorAll('input, select');
@@ -335,96 +301,54 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 5000);
   }
 
-  // 3) Gönder
+  // 3) ✅ YENİ: Gönder butonunun TÜM detaylarını al
   if (submit) {
-    await page.screenshot({ path: '/tmp/before-submit.png', fullPage: true }).catch(() => {});
-    
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
 
-    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await sleep(page, 2000);
-
-    const submitted = await page.evaluate(() => {
-      try {
-        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-        if (btn) {
-          const scope = angular.element(btn).scope();
-          if (scope && typeof scope.submit === 'function') {
-            scope.submit();
-            scope.$apply();
-            return 'angular-submit';
+    // ✅ Butonun tüm bilgilerini al
+    const buttonInfo = await submitBtn.evaluate((el) => {
+      return {
+        outerHTML: el.outerHTML,
+        innerHTML: el.innerHTML,
+        disabled: el.disabled,
+        className: el.className,
+        attributes: Array.from(el.attributes).map(attr => ({
+          name: attr.name,
+          value: attr.value
+        })),
+        computedStyle: {
+          display: window.getComputedStyle(el).display,
+          visibility: window.getComputedStyle(el).visibility,
+          opacity: window.getComputedStyle(el).opacity,
+          pointerEvents: window.getComputedStyle(el).pointerEvents,
+        },
+        parentHTML: el.parentElement ? el.parentElement.outerHTML : null,
+        // Angular scope bilgisi
+        angularScope: (() => {
+          try {
+            const scope = angular.element(el).scope();
+            return {
+              hasScope: !!scope,
+              hasSubmitFunction: scope && typeof scope.submit === 'function',
+              scopeKeys: scope ? Object.keys(scope).filter(k => !k.startsWith('$')) : []
+            };
+          } catch (e) {
+            return { error: e.message };
           }
-        }
-        
-        const forms = document.querySelectorAll('form');
-        for (const form of forms) {
-          if (form.querySelector('[data-cy="click-submit-orderaccount-submit"]')) {
-            const scope = angular.element(form).scope();
-            if (scope && typeof scope.submit === 'function') {
-              scope.submit();
-              scope.$apply();
-              return 'form-angular-submit';
-            }
-            form.submit();
-            return 'form-native-submit';
-          }
-        }
-        
-        btn.removeAttribute('disabled');
-        btn.removeAttribute('ng-disabled');
-        btn.classList.remove('disabled');
-        btn.click();
-        return 'forced-click';
-        
-      } catch (e) {
-        return 'error: ' + e.message;
-      }
+        })()
+      };
     });
 
-    console.log('✅ Submit method:', submitted);
-    await sleep(page, 2000);
+    result.buttonDebugInfo = buttonInfo;
 
-    let confirmationReached = false;
-    for (let i = 0; i < 30; i++) {
-      const currentUrl = page.url();
-      console.log(`Check ${i + 1}/30: ${currentUrl}`);
-      
-      if (currentUrl.includes('/checkout/confirmation')) {
-        confirmationReached = true;
-        break;
-      }
-      
-      await sleep(page, 3000);
-    }
-
-    if (confirmationReached) {
-      result.submitted = true;
-      result.confirmationUrl = page.url();
-      await page.screenshot({ path: '/tmp/after-submit-success.png', fullPage: true }).catch(() => {});
-    } else {
-      result.submitted = false;
-      result.confirmationUrl = page.url();
-      await page.screenshot({ path: '/tmp/after-submit-failed.png', fullPage: true }).catch(() => {});
-      
-      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
-      
-      return { 
-        ok: false, 
-        status: 500, 
-        error: "Submit sonrası confirmation görülmedi", 
-        currentUrl: page.url(),
-        submitMethod: submitted,
-        errorTexts: errorTexts.filter(Boolean),
-        ...result 
-      };
-    }
+    // Artık submit yapmadan dönsün, sadece button bilgisi alsın
+    return result;
   }
 
   return result;
 }
 
-// ✅ SADECE LOGIN TEST
 app.post("/login-test", async (req, res) => {
   const { username, password } = req.body || {};
 
@@ -447,7 +371,6 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ TEK ÜRÜN + (opsiyonel) checkout
 app.post("/add-to-cart", async (req, res) => {
   const { username, password, productCode, uom, qty, checkout } = req.body || {};
 
@@ -489,7 +412,6 @@ app.post("/add-to-cart", async (req, res) => {
   }
 });
 
-// ✅ ÇOKLU ÜRÜN: batch + (opsiyonel) checkout
 app.post("/add-to-cart-batch", async (req, res) => {
   const { username, password, items, stopOnError = true, checkout } = req.body || {};
 
