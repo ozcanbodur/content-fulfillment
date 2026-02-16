@@ -101,7 +101,7 @@ async function addOneItem(page, item) {
     };
   }
 
-  // uomType’ın bulunduğu tr
+  // uomType'ın bulunduğu tr
   const scope = uomType.locator("xpath=ancestor::tr[1]").first();
 
   const addBtn = scope.locator('button[data-cy="click-set-add-stateprice"]').first();
@@ -172,7 +172,7 @@ async function addOneItem(page, item) {
       requestedQty,
       finalQty,
       productUrl,
-      error: "Hedef qty’ye ulaşılamadı",
+      error: "Hedef qty'ye ulaşılamadı",
     };
   }
 
@@ -236,7 +236,7 @@ async function checkoutDelivery(page, params) {
       });
     });
 
-    // “typing” benzeri akış
+    // "typing" benzeri akış
     const text = String(orderRef);
     for (const ch of text) {
       await ref.type(ch, { delay: 20 }).catch(async () => {
@@ -268,7 +268,7 @@ async function checkoutDelivery(page, params) {
     await menu.waitFor({ state: "attached", timeout: 60000 });
 
     const wanted = String(deliveryDateText).trim();
-    // ng-click li’de: li seç
+    // ng-click li'de: li seç
     const hitLi = menu.locator("li", { hasText: wanted }).first();
 
     if ((await hitLi.count()) === 0) {
@@ -290,16 +290,33 @@ async function checkoutDelivery(page, params) {
     result.deliveryDateSelected = true;
   }
 
-  // 3) Gönder
+  // 3) Gönder - ✅ YENİ VERSİYON
   if (submit) {
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
 
+    // ✅ Butonun disabled olmadığından emin ol
+    await page.waitForFunction(
+      () => {
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        return btn && !btn.disabled && !btn.hasAttribute('disabled');
+      },
+      { timeout: 30000 }
+    ).catch(() => console.log("⚠️ Buton hala disabled olabilir"));
+
+    // ✅ Ekstra bekleme: Angular'ın digest cycle'ı için
+    await sleep(page, 2000);
+
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await submitBtn.click({ force: true }).catch(async (e) => {
-      // bazen overlay vs. => DOM click fallback
-      await submitBtn.evaluate((el) => el.click()).catch(() => {});
-    });
+    
+    // ✅ Önce JavaScript click dene
+    try {
+      await submitBtn.evaluate((el) => el.click());
+      console.log("✅ JavaScript click çalıştı");
+    } catch (e) {
+      // ✅ Fallback: Playwright click
+      await submitBtn.click({ force: true }).catch(() => {});
+    }
 
     // Confirmation URL bekle (görmeden submitted=true yapmayalım)
     try {
@@ -307,7 +324,7 @@ async function checkoutDelivery(page, params) {
       result.submitted = true;
       result.confirmationUrl = page.url();
     } catch (e) {
-      // hâlâ confirmation’a gitmediyse: submitted false kalsın, debug info dön
+      // hâlâ confirmation'a gitmediyse: submitted false kalsın, debug info dön
       result.submitted = false;
       result.confirmationUrl = page.url();
       return { ok: false, status: 500, error: "Submit sonrası confirmation görülmedi", ...result };
