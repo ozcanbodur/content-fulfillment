@@ -197,7 +197,7 @@ async function checkoutDelivery(page, params) {
     orderRef,
     deliveryDateText,
     submit = true,
-    waitBefore = 10000, // senin istediğin: önce 10sn bekle
+    waitBefore = 10000,
   } = params || {};
 
   const deliveryUrl = `${BASE_URL}/#/checkout/delivery`;
@@ -227,20 +227,16 @@ async function checkoutDelivery(page, params) {
     await ref.click({ force: true }).catch(() => {});
     await sleep(page, 150);
 
-    // Select all + clear
     await ref.fill("").catch(async () => {
-      // fallback: input event
       await ref.evaluate((el) => {
         el.value = "";
         el.dispatchEvent(new Event("input", { bubbles: true }));
       });
     });
 
-    // "typing" benzeri akış
     const text = String(orderRef);
     for (const ch of text) {
       await ref.type(ch, { delay: 20 }).catch(async () => {
-        // fallback type çalışmazsa value append
         await ref.evaluate((el, c) => {
           el.value = (el.value || "") + c;
           el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -255,7 +251,7 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 500);
   }
 
-  // 2) teslim tarihi seç
+  // 2) teslim tarihi seç - ✅ YENİ VERSİYON
   if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
     const btn = page.locator('[data-cy="delivery-date-dropdown"]').first();
     await btn.waitFor({ state: "attached", timeout: 60000 });
@@ -267,45 +263,63 @@ async function checkoutDelivery(page, params) {
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
     await menu.waitFor({ state: "attached", timeout: 60000 });
 
+    // ✅ YENİ: Önce tüm seçenekleri al
+    const allOptions = await menu.locator("li").allTextContents().catch(() => []);
+    console.log("📅 Mevcut tarih seçenekleri:", allOptions);
+
     const wanted = String(deliveryDateText).trim();
-    // ng-click li'de: li seç
-    const hitLi = menu.locator("li", { hasText: wanted }).first();
+    
+    // ✅ YENI: Hem tam eşleşme hem de partial eşleşme dene
+    let hitLi = menu.locator("li").filter({ hasText: wanted }).first();
+    
+    if ((await hitLi.count()) === 0) {
+      // Tam eşleşme yoksa, partial dene
+      console.log("📅 Tam eşleşme yok, partial deneniyor...");
+      
+      // Sadece sayı kısmını al (18 Şubat 2026 -> 18)
+      const dayMatch = wanted.match(/(\d+)/);
+      if (dayMatch) {
+        const day = dayMatch[1];
+        // İlk bulunanı al
+        hitLi = menu.locator("li").filter({ hasText: day }).first();
+        console.log("📅 Gün ile arama:", day);
+      }
+    }
 
     if ((await hitLi.count()) === 0) {
-      // seçenekleri debug için döndür
-      const opts = await menu.locator("li").allTextContents().catch(() => []);
       return {
         ok: false,
         status: 404,
         error: `Tarih bulunamadı: ${wanted}`,
-        availableDates: opts.map((x) => (x || "").trim()).filter(Boolean),
+        availableDates: allOptions.map((x) => (x || "").trim()).filter(Boolean),
         ...result,
       };
     }
+
+    const selectedText = await hitLi.textContent().catch(() => "");
+    console.log("📅 Seçilen tarih:", selectedText);
 
     await hitLi.scrollIntoViewIfNeeded().catch(() => {});
     await hitLi.click({ force: true }).catch(() => {});
     await sleep(page, 800);
 
     result.deliveryDateSelected = true;
+    result.selectedDateText = selectedText; // ✅ Debug için
     
-    // ✅ YENİ: Form validation trigger
+    // Form validation trigger
     await page.evaluate(() => {
       try {
-        // Tüm input'ları touch et
         const inputs = document.querySelectorAll('input, select');
         inputs.forEach(input => {
           input.dispatchEvent(new Event('blur', { bubbles: true }));
           input.dispatchEvent(new Event('change', { bubbles: true }));
         });
         
-        // Angular scope'u güncelle
         const scope = angular.element(document.body).scope();
         if (scope) {
           scope.$apply();
         }
         
-        // Form scope'unu bul ve validate et
         const forms = document.querySelectorAll('form');
         forms.forEach(form => {
           const formScope = angular.element(form).scope();
@@ -321,9 +335,8 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 5000);
   }
 
-  // 3) Gönder - ✅ EN AGRESİF VERSİYON
+  // 3) Gönder
   if (submit) {
-    // ✅ Screenshot al (debug için)
     await page.screenshot({ path: '/tmp/before-submit.png', fullPage: true }).catch(() => {});
     
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
@@ -332,10 +345,8 @@ async function checkoutDelivery(page, params) {
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
     await sleep(page, 2000);
 
-    // ✅ Formu manuel submit et (Angular bypass)
     const submitted = await page.evaluate(() => {
       try {
-        // Yöntem 1: Angular controller üzerinden submit
         const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
         if (btn) {
           const scope = angular.element(btn).scope();
@@ -346,7 +357,6 @@ async function checkoutDelivery(page, params) {
           }
         }
         
-        // Yöntem 2: Form element üzerinden submit
         const forms = document.querySelectorAll('form');
         for (const form of forms) {
           if (form.querySelector('[data-cy="click-submit-orderaccount-submit"]')) {
@@ -356,13 +366,11 @@ async function checkoutDelivery(page, params) {
               scope.$apply();
               return 'form-angular-submit';
             }
-            // Fallback: native submit
             form.submit();
             return 'form-native-submit';
           }
         }
         
-        // Yöntem 3: Butonu zorla enable edip click
         btn.removeAttribute('disabled');
         btn.removeAttribute('ng-disabled');
         btn.classList.remove('disabled');
@@ -377,7 +385,6 @@ async function checkoutDelivery(page, params) {
     console.log('✅ Submit method:', submitted);
     await sleep(page, 2000);
 
-    // ✅ URL değişimini bekle - daha esnek kontrol
     let confirmationReached = false;
     for (let i = 0; i < 30; i++) {
       const currentUrl = page.url();
@@ -400,7 +407,6 @@ async function checkoutDelivery(page, params) {
       result.confirmationUrl = page.url();
       await page.screenshot({ path: '/tmp/after-submit-failed.png', fullPage: true }).catch(() => {});
       
-      // ✅ Sayfada hata var mı kontrol et
       const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
       
       return { 
@@ -510,7 +516,6 @@ app.post("/add-to-cart-batch", async (req, res) => {
 
       if (!r.ok && stopOnError) break;
 
-      // ürünler arası kısa nefes (SPA stabilize)
       await sleep(page, 1500);
     }
 
