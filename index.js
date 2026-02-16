@@ -13,7 +13,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT = 10000; // min 10 sn (qty artır/azalt sonrası bekleme)
+const WAIT = 10000; // min 10 sn
 
 async function sleep(page, ms) {
   await page.waitForTimeout(ms);
@@ -63,7 +63,7 @@ async function gotoProductSearch(page, productCode) {
   // SPA render + ürün listesi için min bekleme
   await sleep(page, 1500);
 
-  // ürün tbody görünene kadar bekle
+  // ürün tbody görünene kadar bekle (bazen 1-2 render daha oluyor)
   const rowSel = `#product-list-${productCode}`;
   await page.waitForSelector(rowSel, { timeout: 60000 }).catch(() => null);
 
@@ -82,7 +82,14 @@ async function addOneItem(page, item) {
 
   const row = page.locator(`#product-list-${productCode}`).first();
   if ((await row.count()) === 0) {
-    return { ok: false, status: 404, productCode, uom: uomWanted, error: `Ürün bloğu yok: ${productCode}`, productUrl };
+    return {
+      ok: false,
+      status: 404,
+      productCode,
+      uom: uomWanted,
+      error: `Ürün bloğu yok: ${productCode}`,
+      productUrl,
+    };
   }
 
   // UOM listesi (debug/response için)
@@ -109,7 +116,7 @@ async function addOneItem(page, item) {
     };
   }
 
-  // İstenen UOM satırının TR scope’u
+  // İstenen UOM satırının TR scope’u: row içinde ".UOM .type" == ADET/KOLİ olanı bul, closest("tr")
   const scopeHandle = await row.evaluateHandle((tbody, uomUpper) => {
     const typeEls = Array.from(tbody.querySelectorAll(".UOM .type"));
     const match = typeEls.find((el) => (el.textContent || "").trim().toUpperCase() === uomUpper);
@@ -119,7 +126,15 @@ async function addOneItem(page, item) {
 
   const scopeEl = scopeHandle.asElement();
   if (!scopeEl) {
-    return { ok: false, status: 404, productCode, uom: uomWanted, error: `UOM scope bulunamadı: ${uomWanted}`, availableUoms, productUrl };
+    return {
+      ok: false,
+      status: 404,
+      productCode,
+      uom: uomWanted,
+      error: `UOM scope bulunamadı: ${uomWanted}`,
+      availableUoms,
+      productUrl,
+    };
   }
 
   // scope içinde querySelector helper
@@ -129,9 +144,9 @@ async function addOneItem(page, item) {
   };
 
   const getInput = () => q('input[data-cy="click-input-qty"]');
-  const getPlus  = () => q('button[data-cy="click-increase-qtyprice"]');
+  const getPlus = () => q('button[data-cy="click-increase-qtyprice"]');
   const getMinus = () => q('button[data-cy="click-decrease-qtyprice"]');
-  const getAdd   = () => q('button[data-cy="click-set-add-stateprice"]');
+  const getAdd = () => q('button[data-cy="click-set-add-stateprice"]');
 
   const readQty = async () => {
     const inp = await getInput();
@@ -143,13 +158,21 @@ async function addOneItem(page, item) {
   // 1) önce "Ekle" ile qty alanını açtır
   const addBtn = await getAdd();
   if (!addBtn) {
-    return { ok: false, status: 500, productCode, uom: uomWanted, error: "Add/Ekle butonu yok", availableUoms, productUrl };
+    return {
+      ok: false,
+      status: 500,
+      productCode,
+      uom: uomWanted,
+      error: "Add/Ekle butonu yok",
+      availableUoms,
+      productUrl,
+    };
   }
 
   await addBtn.click({ force: true });
   await sleep(page, WAIT);
 
-  // input görünür değilse biraz daha bekle
+  // input görünür değilse biraz daha bekle (Angular bazen hide->show geçişi gecikiyor)
   let cur = await readQty();
   if (cur === null) {
     await sleep(page, WAIT);
@@ -175,7 +198,7 @@ async function addOneItem(page, item) {
     if (now === qtyWanted) break;
 
     if (now === null) {
-      // input kaybolduysa tekrar "Ekle" tıkla
+      // input kaybolduysa tekrar "Ekle" tıkla (UI bazen collapse edebiliyor)
       await addBtn.click({ force: true }).catch(() => {});
       await sleep(page, WAIT);
       continue;
@@ -183,15 +206,17 @@ async function addOneItem(page, item) {
 
     if (now < qtyWanted) {
       const plus = await getPlus();
-      if (!plus) return { ok: false, status: 500, productCode, uom: uomWanted, error: "Plus yok", availableUoms, productUrl };
+      if (!plus)
+        return { ok: false, status: 500, productCode, uom: uomWanted, error: "Plus yok", availableUoms, productUrl };
       await plus.click({ force: true });
       await sleep(page, WAIT);
       continue;
     }
 
-    // now > qtyWanted
+    // now > qtyWanted (nadiren)
     const minus = await getMinus();
-    if (!minus) return { ok: false, status: 500, productCode, uom: uomWanted, error: "Minus yok", availableUoms, productUrl };
+    if (!minus)
+      return { ok: false, status: 500, productCode, uom: uomWanted, error: "Minus yok", availableUoms, productUrl };
     await minus.click({ force: true });
     await sleep(page, WAIT);
   }
@@ -210,75 +235,97 @@ async function addOneItem(page, item) {
 }
 
 /**
- * ✅ Checkout / Delivery adımı:
- * - https://www.mybidfood.com.tr/#/checkout/delivery 'e gider
- * - 10sn bekler
- * - orderreference input'a ORDER_REF yazar
- * - delivery-date-dropdown'dan DELIVERY_DATE_TEXT içeren tarihi seçer
+ * CHECKOUT (delivery) adımı:
+ * - https://www.mybidfood.com.tr/#/checkout/delivery
+ * - 10 sn bekle
+ * - orderreference doldur
+ * - teslim tarihi dropdown’dan seç
+ * - submit:true ise Gönder’e tıkla
  */
-async function completeCheckoutDelivery(page, { orderRef, deliveryDateText }) {
-  const DELIVERY_URL = "https://www.mybidfood.com.tr/#/checkout/delivery";
-  const ORDER_REF = String(orderRef || "").trim();
-  const DELIVERY_DATE_TEXT = String(deliveryDateText || "").trim();
+async function fillDeliveryAndMaybeSubmit(page, checkout) {
+  const orderRef = String(checkout?.orderRef || "").trim();
+  const deliveryDateText = String(checkout?.deliveryDateText || "").trim();
+  const submit = !!checkout?.submit;
 
-  if (!ORDER_REF) return { ok: false, error: "orderRef zorunlu (örn: 39-1221429)" };
-  if (!DELIVERY_DATE_TEXT) return { ok: false, error: "deliveryDateText zorunlu (örn: 21 Şubat 2026)" };
-
-  await page.goto(DELIVERY_URL, { waitUntil: "domcontentloaded" });
-
-  // Angular sayfanın oturması için 10sn
-  await sleep(page, 10000);
-
-  // 1) Sipariş referansı
-  const ref = page.locator('input[name="orderreference"]').first();
-  await ref.waitFor({ state: "visible", timeout: 60000 });
-
-  await ref.click({ force: true });
-  // fill() Angular input eventlerini tetikler, en stabil yöntem
-  await ref.fill(ORDER_REF);
-  // blur/commit
-  await page.keyboard.press("Tab").catch(() => {});
-  await sleep(page, 300);
-
-  // 2) Dropdown aç ve tarih seç
-  const ddBtn = page.locator('[data-cy="delivery-date-dropdown"]').first();
-  await ddBtn.waitFor({ state: "visible", timeout: 60000 });
-
-  await ddBtn.click({ force: true });
-  await sleep(page, 400);
-
-  const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
-  await menu.waitFor({ state: "visible", timeout: 60000 });
-
-  const hitLi = menu.locator("li", { hasText: DELIVERY_DATE_TEXT }).first();
-
-  if ((await hitLi.count()) === 0) {
-    // debug için mevcut seçenekler
-    const options = await menu.locator("li").allTextContents().catch(() => []);
-    return {
-      ok: false,
-      status: 404,
-      error: `Tarih bulunamadı: ${DELIVERY_DATE_TEXT}`,
-      availableDates: options.map((t) => (t || "").trim()).filter(Boolean),
-      url: DELIVERY_URL,
-    };
+  if (!orderRef && !deliveryDateText && !submit) {
+    return { ok: true, skipped: true, note: "checkout boş: işlem yapılmadı" };
   }
 
-  await hitLi.scrollIntoViewIfNeeded().catch(() => {});
-  await hitLi.click({ force: true });
-  await sleep(page, 600);
+  const deliveryUrl = "https://www.mybidfood.com.tr/#/checkout/delivery";
+  await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
 
-  // doğrulama amaçlı buton text
-  const afterText = (await ddBtn.innerText().catch(() => "")).trim();
+  // Angular sayfanın oturması için net bekleme (senin şartın)
+  await sleep(page, 10000);
 
-  return {
-    ok: true,
-    url: DELIVERY_URL,
-    orderRef: ORDER_REF,
-    deliveryDateText: DELIVERY_DATE_TEXT,
-    dropdownTextAfter: afterText,
-    note: "Akış: checkout/delivery -> 10sn bekle -> Sipariş Referansı yaz -> Sevk Tarihi seç.",
-  };
+  const out = { ok: true, deliveryUrl, orderRef, deliveryDateText, submit };
+
+  // 1) Sipariş no
+  if (orderRef) {
+    const ref = page.locator('input[name="orderreference"]').first();
+    await ref.waitFor({ state: "visible", timeout: 60000 });
+
+    // “console’daki gibi” input eventlerini tetiklemek için type ile gidiyoruz
+    await ref.click({ force: true });
+    await sleep(page, 150);
+    await ref.fill(""); // temizle
+    await sleep(page, 50);
+    await ref.type(orderRef, { delay: 20 }); // char char
+    await ref.dispatchEvent("input");
+    await ref.dispatchEvent("change");
+    await ref.dispatchEvent("blur");
+    await sleep(page, 300);
+
+    out.orderRefSet = true;
+  }
+
+  // 2) Teslim tarihi seç
+  if (deliveryDateText) {
+    const btn = page.locator('[data-cy="delivery-date-dropdown"]').first();
+    await btn.waitFor({ state: "visible", timeout: 60000 });
+
+    await btn.click({ force: true });
+    await sleep(page, 500);
+
+    const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
+    await menu.waitFor({ state: "visible", timeout: 60000 });
+
+    // li üstünde ng-click var, o yüzden li’ye tıklıyoruz
+    const li = menu.locator("li", { hasText: deliveryDateText }).first();
+    const liCount = await li.count();
+
+    if (!liCount) {
+      const options = await menu.locator("li").allTextContents().catch(() => []);
+      return {
+        ok: false,
+        status: 404,
+        step: "select-delivery-date",
+        error: `tarih bulunamadı: ${deliveryDateText}`,
+        availableDates: options.map((x) => String(x || "").trim()).filter(Boolean),
+        deliveryUrl,
+      };
+    }
+
+    await li.scrollIntoViewIfNeeded().catch(() => {});
+    await li.click({ force: true });
+    await sleep(page, 700);
+
+    out.deliveryDateSelected = true;
+  }
+
+  // 3) Gönder
+  if (submit) {
+    const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
+    await submitBtn.waitFor({ state: "visible", timeout: 60000 });
+
+    // div tıklama
+    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await submitBtn.click({ force: true });
+    await sleep(page, 1500);
+
+    out.submitted = true;
+  }
+
+  return out;
 }
 
 // ✅ LOGIN TEST
@@ -304,9 +351,9 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ TEK ÜRÜN: add-to-cart (+ opsiyonel checkout/delivery)
+// ✅ TEK ÜRÜN: add-to-cart (+ opsiyonel checkout)
 app.post("/add-to-cart", async (req, res) => {
-  const { username, password, productCode, uom, qty, orderRef, deliveryDateText } = req.body || {};
+  const { username, password, productCode, uom, qty, checkout } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
   if (!productCode || !uom) return res.status(400).json({ ok: false, error: "productCode/uom zorunlu" });
@@ -324,26 +371,14 @@ app.post("/add-to-cart", async (req, res) => {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
 
-    const itemResult = await withTimeout(
-      addOneItem(page, { productCode, uom, qty }),
-      180000,
-      "ADD_TO_CART_TIMEOUT"
-    );
+    const result = await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ADD_TO_CART_TIMEOUT");
 
     let checkoutResult = null;
-    if (orderRef && deliveryDateText) {
-      checkoutResult = await withTimeout(
-        completeCheckoutDelivery(page, { orderRef, deliveryDateText }),
-        180000,
-        "CHECKOUT_DELIVERY_TIMEOUT"
-      );
+    if (checkout && result?.ok) {
+      checkoutResult = await withTimeout(fillDeliveryAndMaybeSubmit(page, checkout), 240000, "CHECKOUT_TIMEOUT");
     }
 
-    return res.json({
-      ok: itemResult.ok && (!checkoutResult || checkoutResult.ok),
-      item: itemResult,
-      checkout: checkoutResult,
-    });
+    return res.json({ ...result, checkoutResult });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
@@ -351,9 +386,9 @@ app.post("/add-to-cart", async (req, res) => {
   }
 });
 
-// ✅ ÇOKLU ÜRÜN: batch (+ opsiyonel checkout/delivery)
+// ✅ ÇOKLU ÜRÜN: batch (+ opsiyonel checkout)
 app.post("/add-to-cart-batch", async (req, res) => {
-  const { username, password, items, stopOnError = true, orderRef, deliveryDateText } = req.body || {};
+  const { username, password, items, stopOnError = true, checkout } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ ok: false, error: "items[] zorunlu" });
@@ -389,22 +424,18 @@ app.post("/add-to-cart-batch", async (req, res) => {
     };
 
     let checkoutResult = null;
-    if (orderRef && deliveryDateText) {
-      checkoutResult = await withTimeout(
-        completeCheckoutDelivery(page, { orderRef, deliveryDateText }),
-        180000,
-        "CHECKOUT_DELIVERY_TIMEOUT"
-      );
+    // checkout’ı sadece (stopOnError=true ise) hiç fail yoksa; stopOnError=false ise submit öncesi sen karar ver
+    const canCheckout = checkout && (stopOnError ? summary.failed === 0 : true);
+
+    if (canCheckout) {
+      checkoutResult = await withTimeout(fillDeliveryAndMaybeSubmit(page, checkout), 240000, "CHECKOUT_TIMEOUT");
     }
 
-    const overallOk =
-      (summary.failed === 0 || !stopOnError) && (!checkoutResult || checkoutResult.ok);
-
     return res.json({
-      ok: overallOk,
+      ok: summary.failed === 0 || !stopOnError,
       summary,
       results,
-      checkout: checkoutResult,
+      checkoutResult,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
