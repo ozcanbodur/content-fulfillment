@@ -289,65 +289,127 @@ async function checkoutDelivery(page, params) {
 
     result.deliveryDateSelected = true;
     
-    // ✅ YENİ: Angular'a form değiştiğini bildir
+    // ✅ YENİ: Form validation trigger
     await page.evaluate(() => {
       try {
+        // Tüm input'ları touch et
+        const inputs = document.querySelectorAll('input, select');
+        inputs.forEach(input => {
+          input.dispatchEvent(new Event('blur', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        
+        // Angular scope'u güncelle
         const scope = angular.element(document.body).scope();
         if (scope) {
           scope.$apply();
         }
+        
+        // Form scope'unu bul ve validate et
+        const forms = document.querySelectorAll('form');
+        forms.forEach(form => {
+          const formScope = angular.element(form).scope();
+          if (formScope && formScope.$$childHead && formScope.$$childHead.$validate) {
+            formScope.$$childHead.$validate();
+          }
+        });
       } catch (e) {
-        console.log("Angular scope trigger hatası:", e);
+        console.log("Validation trigger hatası:", e);
       }
     }).catch(() => {});
     
-    // ✅ YENİ: Ekstra uzun bekleme - Angular validation için
     await sleep(page, 5000);
   }
 
-  // 3) Gönder - ✅ YENİ VERSİYON
+  // 3) Gönder - ✅ EN AGRESİF VERSİYON
   if (submit) {
+    // ✅ Screenshot al (debug için)
+    await page.screenshot({ path: '/tmp/before-submit.png', fullPage: true }).catch(() => {});
+    
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
 
-    // ✅ Scroll to button
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await sleep(page, 1000);
+    await sleep(page, 2000);
 
-    // ✅ Butonu zorla enable et
-    await submitBtn.evaluate((el) => {
-      el.removeAttribute('disabled');
-      el.removeAttribute('ng-disabled');
-      el.classList.remove('disabled');
+    // ✅ Formu manuel submit et (Angular bypass)
+    const submitted = await page.evaluate(() => {
+      try {
+        // Yöntem 1: Angular controller üzerinden submit
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        if (btn) {
+          const scope = angular.element(btn).scope();
+          if (scope && typeof scope.submit === 'function') {
+            scope.submit();
+            scope.$apply();
+            return 'angular-submit';
+          }
+        }
+        
+        // Yöntem 2: Form element üzerinden submit
+        const forms = document.querySelectorAll('form');
+        for (const form of forms) {
+          if (form.querySelector('[data-cy="click-submit-orderaccount-submit"]')) {
+            const scope = angular.element(form).scope();
+            if (scope && typeof scope.submit === 'function') {
+              scope.submit();
+              scope.$apply();
+              return 'form-angular-submit';
+            }
+            // Fallback: native submit
+            form.submit();
+            return 'form-native-submit';
+          }
+        }
+        
+        // Yöntem 3: Butonu zorla enable edip click
+        btn.removeAttribute('disabled');
+        btn.removeAttribute('ng-disabled');
+        btn.classList.remove('disabled');
+        btn.click();
+        return 'forced-click';
+        
+      } catch (e) {
+        return 'error: ' + e.message;
+      }
     });
 
-    await sleep(page, 500);
+    console.log('✅ Submit method:', submitted);
+    await sleep(page, 2000);
 
-    // ✅ Multiple click attempts
-    for (let i = 0; i < 3; i++) {
-      try {
-        await submitBtn.evaluate((el) => el.click());
-        console.log(`✅ Click attempt ${i + 1} successful`);
+    // ✅ URL değişimini bekle - daha esnek kontrol
+    let confirmationReached = false;
+    for (let i = 0; i < 30; i++) {
+      const currentUrl = page.url();
+      console.log(`Check ${i + 1}/30: ${currentUrl}`);
+      
+      if (currentUrl.includes('/checkout/confirmation')) {
+        confirmationReached = true;
         break;
-      } catch (e) {
-        console.log(`❌ Click attempt ${i + 1} failed`);
-        await sleep(page, 1000);
       }
+      
+      await sleep(page, 3000);
     }
 
-    // ✅ Wait for confirmation page
-    try {
-      await page.waitForURL(/#\/checkout\/confirmation/i, { timeout: 90000 });
+    if (confirmationReached) {
       result.submitted = true;
       result.confirmationUrl = page.url();
-    } catch (e) {
+      await page.screenshot({ path: '/tmp/after-submit-success.png', fullPage: true }).catch(() => {});
+    } else {
       result.submitted = false;
       result.confirmationUrl = page.url();
+      await page.screenshot({ path: '/tmp/after-submit-failed.png', fullPage: true }).catch(() => {});
+      
+      // ✅ Sayfada hata var mı kontrol et
+      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
+      
       return { 
         ok: false, 
         status: 500, 
         error: "Submit sonrası confirmation görülmedi", 
         currentUrl: page.url(),
+        submitMethod: submitted,
+        errorTexts: errorTexts.filter(Boolean),
         ...result 
       };
     }
