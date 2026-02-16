@@ -290,49 +290,117 @@ async function checkoutDelivery(page, params) {
     result.deliveryDateSelected = true;
   }
 
-  // 3) Gönder - ✅ YENİ VERSİYON
-  if (submit) {
-    const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
-    await submitBtn.waitFor({ state: "attached", timeout: 60000 });
+ // 3) Gönder - ✅ DAHA AGRESİF VERSİYON
+if (submit) {
+  // ✅ Tarih seçiminden sonra Angular'ın işlemesi için uzun bekle
+  await sleep(page, 3000);
 
-    // ✅ Butonun disabled olmadığından emin ol
-    await page.waitForFunction(
-      () => {
-        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-        return btn && !btn.disabled && !btn.hasAttribute('disabled');
-      },
-      { timeout: 30000 }
-    ).catch(() => console.log("⚠️ Buton hala disabled olabilir"));
+  const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
+  await submitBtn.waitFor({ state: "attached", timeout: 60000 });
 
-    // ✅ Ekstra bekleme: Angular'ın digest cycle'ı için
-    await sleep(page, 2000);
+  // ✅ Debug: Buton durumunu kontrol et
+  const btnDebug = await submitBtn.evaluate((el) => ({
+    disabled: el.disabled,
+    ngDisabled: el.getAttribute('ng-disabled'),
+    classes: el.className,
+    visible: el.offsetParent !== null
+  }));
+  console.log("🔍 Buton durumu:", btnDebug);
 
-    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    
-    // ✅ Önce JavaScript click dene
+  // ✅ Butonun enabled olmasını bekle
+  await page.waitForFunction(
+    () => {
+      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+      return btn && !btn.disabled && !btn.hasAttribute('disabled');
+    },
+    { timeout: 30000 }
+  ).catch(() => console.log("⚠️ Buton hala disabled"));
+
+  // ✅ ng-disabled attribute'ünü zorla kaldır (Angular bazen takılıyor)
+  await submitBtn.evaluate((el) => {
+    el.removeAttribute('disabled');
+    el.removeAttribute('ng-disabled');
+    el.classList.remove('disabled');
+  });
+
+  await sleep(page, 1000);
+  
+  await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
+  
+  // ✅ Birden fazla click yöntemi dene
+  let clicked = false;
+  
+  // Yöntem 1: DOM click
+  try {
+    await submitBtn.evaluate((el) => el.click());
+    console.log("✅ DOM click çalıştı");
+    clicked = true;
+  } catch (e) {
+    console.log("❌ DOM click başarısız:", e.message);
+  }
+  
+  await sleep(page, 500);
+  
+  // Yöntem 2: Playwright click
+  if (!clicked) {
     try {
-      await submitBtn.evaluate((el) => el.click());
-      console.log("✅ JavaScript click çalıştı");
+      await submitBtn.click({ force: true });
+      console.log("✅ Playwright click çalıştı");
+      clicked = true;
     } catch (e) {
-      // ✅ Fallback: Playwright click
-      await submitBtn.click({ force: true }).catch(() => {});
+      console.log("❌ Playwright click başarısız:", e.message);
     }
-
-    // Confirmation URL bekle (görmeden submitted=true yapmayalım)
+  }
+  
+  await sleep(page, 500);
+  
+  // Yöntem 3: Angular scope üzerinden trigger et
+  if (!clicked) {
     try {
-      await page.waitForURL(/#\/checkout\/confirmation/i, { timeout: 60000 });
-      result.submitted = true;
-      result.confirmationUrl = page.url();
+      await page.evaluate(() => {
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        if (btn) {
+          const scope = angular.element(btn).scope();
+          if (scope && scope.submit) {
+            scope.submit();
+            scope.$apply();
+          } else {
+            btn.click();
+          }
+        }
+      });
+      console.log("✅ Angular trigger çalıştı");
     } catch (e) {
-      // hâlâ confirmation'a gitmediyse: submitted false kalsın, debug info dön
-      result.submitted = false;
-      result.confirmationUrl = page.url();
-      return { ok: false, status: 500, error: "Submit sonrası confirmation görülmedi", ...result };
+      console.log("❌ Angular trigger başarısız:", e.message);
     }
   }
 
-  return result;
+  // Confirmation URL bekle (daha uzun timeout)
+  try {
+    await page.waitForURL(/#\/checkout\/confirmation/i, { timeout: 90000 });
+    result.submitted = true;
+    result.confirmationUrl = page.url();
+    console.log("✅ Confirmation sayfasına gidildi:", result.confirmationUrl);
+  } catch (e) {
+    // hâlâ confirmation'a gitmediyse
+    result.submitted = false;
+    result.confirmationUrl = page.url();
+    
+    // Sayfada hata mesajı var mı kontrol et
+    const errorMsg = await page.locator('text=/hata|error|başarısız/i').first().textContent().catch(() => null);
+    
+    return { 
+      ok: false, 
+      status: 500, 
+      error: "Submit sonrası confirmation görülmedi", 
+      errorMessage: errorMsg,
+      currentUrl: page.url(),
+      ...result 
+    };
+  }
 }
+
+
 
 // ✅ SADECE LOGIN TEST
 app.post("/login-test", async (req, res) => {
