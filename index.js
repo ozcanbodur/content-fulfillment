@@ -223,21 +223,31 @@ async function checkoutDelivery(page, params) {
     confirmationUrl: null,
   };
 
-  // Delivery sayfasına git
-  await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
+  // Chrome recording'e göre doğru akış:
+  // Sepet ikonu → Siparişi Tamamla → Devam → Delivery sayfası
+
+  // 1) Sepet ikonuna tıkla
+  console.log('Sepet ikonuna tıklanıyor...');
+  const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
+  await cartIcon.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
+  await cartIcon.click().catch(() => {});
+  await sleep(page, 3000);
+
+  // 2) "Siparişi Tamamla" butonuna tıkla
+  console.log('Siparişi Tamamla tıklanıyor...');
+  const checkoutBtn = page.locator('[data-cy="click-checkout-landing"]').first();
+  await checkoutBtn.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
+  await checkoutBtn.click().catch(() => {});
+  await sleep(page, 3000);
+
+  // 3) "Devam" butonuna tıkla
+  console.log('Devam butonuna tıklanıyor...');
+  const continueBtn = page.locator('[data-cy="continue-button"]').first();
+  await continueBtn.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
+  await continueBtn.click().catch(() => {});
   await sleep(page, waitBefore);
 
-  // Submit butonunun scope'unu bul - buradan account ve tüm model erişimi yapacağız
-  const scopeReady = await page.evaluate(() => {
-    try {
-      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-      if (!btn) return false;
-      const scope = angular.element(btn).scope();
-      return !!scope;
-    } catch(e) { return false; }
-  }).catch(() => false);
-
-  console.log('Angular scope hazır:', scopeReady);
+  console.log('Delivery sayfasına ulaşıldı:', page.url());
 
   // 1) orderRef ve deliveryDate'i Angular scope'a direkt yaz
   const setResult = await page.evaluate((params) => {
