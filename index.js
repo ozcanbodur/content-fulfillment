@@ -577,29 +577,62 @@ app.post("/debug-checkout-page", async (req, res) => {
     // Hata mesajları varsa
     const errorMessages = await page.locator('text=/hata|error|uyarı|warning/i').allTextContents().catch(() => []);
 
-    // Angular form state
-    const formState = await page.evaluate(() => {
+    // Angular scope - submit'i etkileyen kritik değerler
+    const angularScope = await page.evaluate(() => {
       try {
-        const forms = document.querySelectorAll('form[name]');
-        return Array.from(forms).map(form => {
-          const scope = angular.element(form).scope();
-          const formName = form.getAttribute('name');
-          const formCtrl = scope && scope[formName];
-          return {
-            formName,
-            valid: formCtrl ? formCtrl.$valid : null,
-            invalid: formCtrl ? formCtrl.$invalid : null,
-            errors: formCtrl ? formCtrl.$error : null,
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        if (!btn) return { error: 'btn not found' };
+        
+        // Submit butonunun scope'unu bul
+        let scope = angular.element(btn).scope();
+        
+        // Scope'ta submitOrder'ı bul (parent'lara çık)
+        let targetScope = scope;
+        let depth = 0;
+        while (targetScope && depth < 15) {
+          if (typeof targetScope.submitOrder === 'function' || 
+              typeof targetScope.checkMinOrderSubmit === 'function') break;
+          targetScope = targetScope.$parent;
+          depth++;
+        }
+
+        if (!targetScope) return { error: 'scope with submitOrder not found' };
+
+        // Kritik değerleri oku
+        const result = {
+          submitDisabled: targetScope.submitDisabled,
+          hasRestrictedDeliveryItems: targetScope.hasRestrictedDeliveryItems,
+          approvalNeeded: targetScope.approvalNeeded,
+          canTradeOnline: targetScope.canTradeOnline,
+          canAllowCredit: targetScope.canAllowCredit,
+          isApproverShadowSession: targetScope.isApproverShadowSession,
+          checkMinOrderSubmitResult: null,
+          checkRestrictedProductResult: null,
+        };
+
+        // Fonksiyonları çağır
+        try { result.checkMinOrderSubmitResult = targetScope.checkMinOrderSubmit(); } catch(e) { result.checkMinOrderSubmitResult = 'ERROR: ' + e.message; }
+        try { 
+          const account = targetScope.account || (targetScope.accounts && targetScope.accounts[0]);
+          result.checkRestrictedProductResult = targetScope.checkRestrictedProduct(account); 
+          result.account = {
+            ReferenceNumber: account && account.Header && account.Header.ReferenceNumber,
+            DeliveryDate: account && account.Header && account.Header.DeliveryDate,
+            HasItems: account && account.Entries && account.Entries.length,
           };
-        });
-      } catch(e) { return { error: e.message }; }
+        } catch(e) { result.checkRestrictedProductResult = 'ERROR: ' + e.message; }
+
+        return result;
+      } catch(e) {
+        return { error: e.message };
+      }
     }).catch(e => ({ error: String(e) }));
 
     return res.json({
       ok: true,
       currentUrl: page.url(),
       submitBtnState,
-      formState,
+      angularScope,
       inputs,
       errorMessages: errorMessages.filter(Boolean),
       fullHtml,
