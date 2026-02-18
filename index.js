@@ -67,7 +67,11 @@ async function addOneItem(page, item) {
     return { ok: false, status: 400, productCode, showUom: uom, error: "qty >= 1 olmalı" };
   }
 
-  const productUrl = `${BASE_URL}/#/products/search/?searchTerm=${encodeURIComponent(
+  // Mevcut URL'den kullanıcıya özgü base path'i al (örn: /u/13185)
+  const currentPageUrl = page.url();
+  const userPathMatch2 = currentPageUrl.match(/mybidfood\.com\.tr(\/u\/[^/#]+)/);
+  const userBasePath2 = userPathMatch2 ? userPathMatch2[1] : '';
+  const productUrl = `${BASE_URL}${userBasePath2}/#/products/search/?searchTerm=${encodeURIComponent(
     productCode
   )}&category=All&page=1&useUrlParams=true`;
 
@@ -200,7 +204,12 @@ async function checkoutDelivery(page, params) {
     waitBefore = 10000,
   } = params || {};
 
-  const deliveryUrl = `${BASE_URL}/#/checkout/delivery`;
+  // Login sonrası URL'den kullanıcıya özgü base path'i al (örn: /u/13185)
+  const currentUrl = page.url();
+  const userPathMatch = currentUrl.match(/mybidfood\.com\.tr(\/u\/[^/#]+)/);
+  const userBasePath = userPathMatch ? userPathMatch[1] : '';
+  const deliveryUrl = `${BASE_URL}${userBasePath}/#/checkout/delivery`;
+  console.log('Delivery URL:', deliveryUrl);
 
   const result = {
     ok: true,
@@ -399,6 +408,34 @@ async function checkoutDelivery(page, params) {
       };
     }
 
+    // Submit öncesi screenshot al
+    await page.screenshot({ path: '/tmp/before-submit.png', fullPage: true }).catch(() => {});
+    
+    // Submit öncesi sayfanın son halini logla
+    const preSubmitState = await page.evaluate(() => {
+      try {
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        let scope = angular.element(btn).scope();
+        let s = scope;
+        let d = 0;
+        while (s && d < 15) {
+          if (s.account && s.account.Header) break;
+          s = s.$parent; d++;
+        }
+        const h = s && s.account && s.account.Header;
+        return {
+          ReferenceNumber: h && h.ReferenceNumber,
+          DeliveryDate: h && h.DeliveryDate,
+          submitDisabled: s && s.submitDisabled,
+          btnDisabled: btn.getAttribute('disabled'),
+          btnClass: btn.className,
+          url: window.location.href,
+        };
+      } catch(e) { return { error: e.message }; }
+    }).catch(e => ({ error: String(e) }));
+    console.log('Pre-submit state:', JSON.stringify(preSubmitState));
+    result.preSubmitState = preSubmitState;
+
     // Angular'ın kendi event pipeline'ını tetiklemek için native Playwright click
     await submitBtn.click();
     console.log('✅ Submit butonuna tıklandı (native click)');
@@ -426,7 +463,10 @@ async function checkoutDelivery(page, params) {
     } else {
       result.submitted = false;
       result.confirmationUrl = page.url();
-      await page.screenshot({ path: '/tmp/after-submit-failed.png', fullPage: true }).catch(() => {});
+      
+      // Screenshot'ı base64 olarak al
+      const screenshotBase64 = await page.screenshot({ fullPage: true }).then(buf => buf.toString('base64')).catch(() => null);
+      result.screenshotBase64 = screenshotBase64;
 
       const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
 
