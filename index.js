@@ -367,16 +367,12 @@ async function checkoutDelivery(page, params) {
     result.selectedDateText = setResult.selectedDateValue;
   }
 
-  // Angular'ı son kez sync et
-  await page.evaluate(() => {
-    try {
-      angular.element(document.body).scope().$apply();
-    } catch(e) {}
-  }).catch(() => {});
+  // Sayfayı reload et - Angular taze yüklensin, hata state temizlensin
+  console.log("Sayfa reload ediliyor - Angular state temizleniyor...");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await sleep(page, 8000);
 
-  await sleep(page, 2000);
-
-  // 3) Gönder - Gerçek DOM click ile Angular event pipeline'ını tetikle
+  // 3) Gönder - Reload sonrası taze sayfada submit
   if (submit) {
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
@@ -685,11 +681,49 @@ app.post("/debug-checkout-page", async (req, res) => {
       }
     }).catch(e => ({ error: String(e) }));
 
+    // Delivery date dropdown scope'unu tara
+    const deliveryDateScope = await page.evaluate(() => {
+      try {
+        const dropdown = document.querySelector('[data-cy="delivery-date-dropdown"]');
+        if (!dropdown) return { error: 'dropdown not found' };
+        let scope = angular.element(dropdown).scope();
+        let depth = 0;
+        const result = { levels: [] };
+        while (scope && depth < 20) {
+          const keys = Object.keys(scope).filter(k => !k.startsWith('$'));
+          const dateKeys = keys.filter(k =>
+            k.toLowerCase().includes('date') ||
+            k.toLowerCase().includes('delivery') ||
+            k.toLowerCase().includes('slot')
+          );
+          if (dateKeys.length > 0) {
+            const level = { depth, keys: dateKeys, values: {} };
+            dateKeys.forEach(k => {
+              const val = scope[k];
+              if (Array.isArray(val)) {
+                level.values[k] = val.slice(0, 3).map(d =>
+                  typeof d === 'object' ? JSON.stringify(d).slice(0, 300) : d
+                );
+              } else if (typeof val !== 'function') {
+                level.values[k] = typeof val === 'object' ?
+                  JSON.stringify(val).slice(0, 300) : val;
+              }
+            });
+            result.levels.push(level);
+          }
+          scope = scope.$parent;
+          depth++;
+        }
+        return result;
+      } catch(e) { return { error: e.message }; }
+    }).catch(e => ({ error: String(e) }));
+
     return res.json({
       ok: true,
       currentUrl: page.url(),
       submitBtnState,
       angularScope,
+      deliveryDateScope,
       inputs,
       errorMessages: errorMessages.filter(Boolean),
       fullHtml,
