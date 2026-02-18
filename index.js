@@ -512,5 +512,105 @@ app.post("/add-to-cart-batch", async (req, res) => {
   }
 });
 
+// 🔍 DEBUG: Checkout/delivery sayfasının tam DOM yapısını döker
+app.post("/debug-checkout-page", async (req, res) => {
+  const { username, password, productCode, uom, qty, waitBefore = 10000 } = req.body || {};
+
+  if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+
+  const page = await browser.newPage();
+  page.setDefaultTimeout(60000);
+  page.setDefaultNavigationTimeout(60000);
+
+  try {
+    // Login
+    const loginResult = await withTimeout(login(page, username, password), 60000);
+    if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
+
+    // Ürün ekle (sepet dolu olsun ki checkout sayfası gerçek halini göstersin)
+    if (productCode) {
+      await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
+    }
+
+    // Delivery sayfasına git
+    const deliveryUrl = `${BASE_URL}/#/checkout/delivery`;
+    await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(waitBefore);
+
+    // Tam HTML
+    const fullHtml = await page.content();
+
+    // Submit butonunun durumu
+    const submitBtnState = await page.evaluate(() => {
+      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+      if (!btn) return { found: false };
+      return {
+        found: true,
+        disabled: btn.disabled,
+        className: btn.className,
+        outerHTML: btn.outerHTML,
+        ngDisabled: btn.getAttribute('ng-disabled'),
+        ngClick: btn.getAttribute('ng-click'),
+      };
+    }).catch(e => ({ error: String(e) }));
+
+    // Tüm input/select elementleri ve değerleri
+    const inputs = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('input, select, textarea')).map(el => ({
+        tag: el.tagName,
+        type: el.type,
+        name: el.name,
+        id: el.id,
+        value: el.value,
+        disabled: el.disabled,
+        ngModel: el.getAttribute('ng-model'),
+        dataCy: el.getAttribute('data-cy'),
+        placeholder: el.placeholder,
+      }));
+    }).catch(e => ({ error: String(e) }));
+
+    // Hata mesajları varsa
+    const errorMessages = await page.locator('text=/hata|error|uyarı|warning/i').allTextContents().catch(() => []);
+
+    // Angular form state
+    const formState = await page.evaluate(() => {
+      try {
+        const forms = document.querySelectorAll('form[name]');
+        return Array.from(forms).map(form => {
+          const scope = angular.element(form).scope();
+          const formName = form.getAttribute('name');
+          const formCtrl = scope && scope[formName];
+          return {
+            formName,
+            valid: formCtrl ? formCtrl.$valid : null,
+            invalid: formCtrl ? formCtrl.$invalid : null,
+            errors: formCtrl ? formCtrl.$error : null,
+          };
+        });
+      } catch(e) { return { error: e.message }; }
+    }).catch(e => ({ error: String(e) }));
+
+    return res.json({
+      ok: true,
+      currentUrl: page.url(),
+      submitBtnState,
+      formState,
+      inputs,
+      errorMessages: errorMessages.filter(Boolean),
+      fullHtml,
+    });
+
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  } finally {
+    await browser.close();
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => console.log("Server listening on", PORT));
