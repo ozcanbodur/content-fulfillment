@@ -331,90 +331,72 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 5000);
   }
 
-  // 3) Gönder - ✅ ANGULAR submitOrder FONKSIYONUNU ÇAĞIR
+  // 3) Gönder - Gerçek DOM click ile Angular event pipeline'ını tetikle
   if (submit) {
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
 
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await sleep(page, 5000); // Uzun bekle - Angular hazır olsun
 
-    // ✅ Angular submitOrder fonksiyonunu direkt çağır
-    const submitted = await page.evaluate(() => {
-      try {
-        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-        if (!btn) return 'button-not-found';
-        
-        const scope = angular.element(btn).scope();
-        if (!scope) return 'scope-not-found';
-        
-        // submitOrder fonksiyonunu bul
-        if (typeof scope.submitOrder === 'function') {
-          // account parametresini scope'tan al
-          const account = scope.account || scope.$parent.account || (scope.accounts && scope.accounts[0]);
-          scope.submitOrder(account, 'submit');
-          scope.$apply();
-          return 'submitOrder-called';
-        }
-        
-        // Parent scope'ta dene
-        let parent = scope.$parent;
-        let depth = 0;
-        while (parent && depth < 10) {
-          if (typeof parent.submitOrder === 'function') {
-            const account = parent.account || (parent.accounts && parent.accounts[0]);
-            parent.submitOrder(account, 'submit');
-            parent.$apply();
-            return 'parent-submitOrder-called';
-          }
-          parent = parent.$parent;
-          depth++;
-        }
-        
-        return 'submitOrder-not-found';
-        
-      } catch (e) {
-        return 'error: ' + e.message;
-      }
-    });
+    // Buton disabled ise enabled olana kadar bekle (max 30 sn)
+    let btnEnabled = false;
+    for (let i = 0; i < 30; i++) {
+      const isDisabled = await submitBtn.isDisabled().catch(() => true);
+      if (!isDisabled) { btnEnabled = true; break; }
+      console.log(`Submit butonu disabled, bekleniyor... (${i + 1}/30)`);
+      await sleep(page, 1000);
+    }
 
-    console.log('✅ Submit result:', submitted);
+    if (!btnEnabled) {
+      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
+      return {
+        ok: false,
+        status: 500,
+        error: "Submit butonu 30 saniye sonra hâlâ disabled",
+        errorTexts: errorTexts.filter(Boolean),
+        ...result,
+      };
+    }
+
+    // Angular'ın kendi event pipeline'ını tetiklemek için native Playwright click
+    await submitBtn.click();
+    console.log('✅ Submit butonuna tıklandı (native click)');
     await sleep(page, 3000);
 
-    // Confirmation bekle
+    // Confirmation bekle (max 90 sn)
     let confirmationReached = false;
     for (let i = 0; i < 30; i++) {
       const currentUrl = page.url();
       console.log(`Check ${i + 1}/30: ${currentUrl}`);
-      
+
       if (currentUrl.includes('/checkout/confirmation')) {
         confirmationReached = true;
         break;
       }
-      
+
       await sleep(page, 3000);
     }
 
     if (confirmationReached) {
       result.submitted = true;
       result.confirmationUrl = page.url();
-      result.submitMethod = submitted;
+      result.submitMethod = 'native-click';
       await page.screenshot({ path: '/tmp/after-submit-success.png', fullPage: true }).catch(() => {});
     } else {
       result.submitted = false;
       result.confirmationUrl = page.url();
       await page.screenshot({ path: '/tmp/after-submit-failed.png', fullPage: true }).catch(() => {});
-      
+
       const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
-      
-      return { 
-        ok: false, 
-        status: 500, 
-        error: "Submit sonrası confirmation görülmedi", 
+
+      return {
+        ok: false,
+        status: 500,
+        error: "Submit sonrası confirmation görülmedi",
         currentUrl: page.url(),
-        submitMethod: submitted,
+        submitMethod: 'native-click',
         errorTexts: errorTexts.filter(Boolean),
-        ...result 
+        ...result,
       };
     }
   }
