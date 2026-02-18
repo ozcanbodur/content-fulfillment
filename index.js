@@ -192,28 +192,19 @@ async function addOneItem(page, item) {
 }
 
 /**
- * Sepet sonrası: checkout/delivery sayfasına gider,
- * order ref yazar, teslim tarihini seçer, submit tıklar,
- * confirmation ekranını görünce submitted=true döner.
+ * Tam akış: Sepet ikonu → Siparişi Tamamla → Sipariş Detayları (ref yaz, Devam) →
+ * Sipariş Sevk Detayları (tarih seç, Gönder) → Confirmation
  */
 async function checkoutDelivery(page, params) {
   const {
     orderRef,
     deliveryDateText,
     submit = true,
-    waitBefore = 10000,
+    waitBefore = 5000,
   } = params || {};
-
-  // Login sonrası URL'den kullanıcıya özgü base path'i al (örn: /u/13185)
-  const currentUrl = page.url();
-  const userPathMatch = currentUrl.match(/mybidfood\.com\.tr(\/u\/[^/#]+)/);
-  const userBasePath = userPathMatch ? userPathMatch[1] : '';
-  const deliveryUrl = `${BASE_URL}${userBasePath}/#/checkout/delivery`;
-  console.log('Delivery URL:', deliveryUrl);
 
   const result = {
     ok: true,
-    deliveryUrl,
     orderRef: orderRef ?? null,
     deliveryDateText: deliveryDateText ?? null,
     submit: !!submit,
@@ -223,222 +214,142 @@ async function checkoutDelivery(page, params) {
     confirmationUrl: null,
   };
 
-  // Chrome recording'e göre doğru akış:
-  // Sepet ikonu → Siparişi Tamamla → Devam → Delivery sayfası
-
-  // 1) Sepet ikonuna tıkla
-  console.log('Sepet ikonuna tıklanıyor...');
+  // ADIM 1: Sepet ikonuna tıkla - yan panel açılır
+  console.log('ADIM 1: Sepet ikonuna tıklanıyor...');
   const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
-  await cartIcon.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
-  await cartIcon.click().catch(() => {});
-  await sleep(page, 3000);
+  await cartIcon.waitFor({ state: 'attached', timeout: 30000 });
+  await cartIcon.click();
+  await sleep(page, 2000);
 
-  // 2) "Siparişi Tamamla" butonuna tıkla
-  console.log('Siparişi Tamamla tıklanıyor...');
+  // ADIM 2: "Siparişi Tamamla" butonuna tıkla
+  console.log('ADIM 2: Siparişi Tamamla tıklanıyor...');
   const checkoutBtn = page.locator('[data-cy="click-checkout-landing"]').first();
-  await checkoutBtn.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
-  await checkoutBtn.click().catch(() => {});
-  await sleep(page, 3000);
-
-  // 3) "Devam" butonuna tıkla
-  console.log('Devam butonuna tıklanıyor...');
-  const continueBtn = page.locator('[data-cy="continue-button"]').first();
-  await continueBtn.waitFor({ state: 'attached', timeout: 30000 }).catch(() => {});
-  await continueBtn.click().catch(() => {});
+  await checkoutBtn.waitFor({ state: 'attached', timeout: 30000 });
+  await checkoutBtn.click();
   await sleep(page, waitBefore);
+  console.log('Sipariş Detayları sayfası:', page.url());
 
-  console.log('Delivery sayfasına ulaşıldı:', page.url());
+  // ADIM 3: Sipariş Detayları sayfası - orderRef yaz
+  if (orderRef && String(orderRef).trim().length > 0) {
+    console.log('ADIM 3: OrderRef yazılıyor...', orderRef);
+    const refInput = page.locator('[data-cy="headerOrderRef"]').first();
+    await refInput.waitFor({ state: 'attached', timeout: 30000 });
+    await refInput.scrollIntoViewIfNeeded().catch(() => {});
+    await refInput.click();
+    await sleep(page, 200);
 
-  // 1) orderRef ve deliveryDate'i Angular scope'a direkt yaz
-  const setResult = await page.evaluate((params) => {
-    try {
-      const { orderRef, deliveryDateText } = params;
+    // Mevcut değeri temizle ve yaz
+    await refInput.selectText().catch(() => {});
+    await refInput.fill(String(orderRef));
 
-      // Submit butonunun scope'undan başla, submitOrder olan scope'u bul
-      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-      if (!btn) return { error: 'btn not found' };
+    // Angular ng-model tetikle
+    await refInput.evaluate((el) => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+      try {
+        const s = angular.element(el).scope();
+        if (s) s.$apply();
+      } catch(e) {}
+    });
 
-      let scope = angular.element(btn).scope();
-      let targetScope = scope;
-      let depth = 0;
-      while (targetScope && depth < 15) {
-        if (targetScope.account && targetScope.account.Header) break;
-        targetScope = targetScope.$parent;
-        depth++;
-      }
-
-      if (!targetScope || !targetScope.account) return { error: 'account scope bulunamadı' };
-
-      const account = targetScope.account;
-      const before = {
-        ReferenceNumber: account.Header.ReferenceNumber,
-        DeliveryDate: account.Header.DeliveryDate,
-      };
-
-      // 1a) orderRef'i Angular model'e direkt yaz
-      if (orderRef) {
-        account.Header.ReferenceNumber = orderRef;
-      }
-
-      // 1b) deliveryDate - dropdown'dan eşleşen option'ı bul ve set et
-      let dateSet = false;
-      let availableDates = [];
-      let selectedDateValue = null;
-
-      if (deliveryDateText && targetScope.deliveryDates) {
-        availableDates = targetScope.deliveryDates.map(d => ({
-          text: d.DeliveryDateDisplay || d.DisplayDate || d.Text || JSON.stringify(d),
-          value: d,
-        }));
-
-        const wanted = String(deliveryDateText).trim();
-        const match = targetScope.deliveryDates.find(d => {
-          const txt = (d.DeliveryDateDisplay || d.DisplayDate || d.Text || '');
-          return txt.includes(wanted) || wanted.includes(txt.trim()) || txt.trim().includes(wanted.split(' ')[0]);
-        });
-
-        if (match) {
-          // Angular'ın selectDeliveryDate veya benzeri fonksiyonu varsa çağır
-          if (typeof targetScope.selectDeliveryDate === 'function') {
-            targetScope.selectDeliveryDate(match);
-            dateSet = true;
-            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
-          } else if (typeof targetScope.setDeliveryDate === 'function') {
-            targetScope.setDeliveryDate(match);
-            dateSet = true;
-            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
-          } else {
-            // Direkt model'e yaz
-            account.Header.DeliveryDate = match.DeliveryDate || match.Value || match;
-            dateSet = true;
-            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
-          }
-        }
-      }
-
-      // $apply ile Angular'ı güncelle
-      targetScope.$apply();
-
-      return {
-        ok: true,
-        before,
-        after: {
-          ReferenceNumber: account.Header.ReferenceNumber,
-          DeliveryDate: account.Header.DeliveryDate,
-        },
-        dateSet,
-        availableDates: availableDates.slice(0, 10).map(d => d.text),
-        selectedDateValue,
-        deliveryDatesCount: targetScope.deliveryDates ? targetScope.deliveryDates.length : 0,
-      };
-    } catch(e) {
-      return { error: e.message, stack: e.stack };
-    }
-  }, { orderRef, deliveryDateText }).catch(e => ({ error: String(e) }));
-
-  console.log('Angular scope set result:', JSON.stringify(setResult));
-  result.scopeSetResult = setResult;
-
-  if (setResult && setResult.ok) {
-    result.orderRefSet = !!orderRef;
-    await sleep(page, 1000);
+    await sleep(page, 500);
+    result.orderRefSet = true;
   }
 
-  // 2) Tarih dropdown'dan seçilmediyse DOM ile dene (fallback)
-  if (deliveryDateText && (!setResult?.dateSet)) {
-    console.log('Scope ile tarih set edilemedi, DOM ile deneniyor...');
-    const btn = page.locator('[data-cy="delivery-date-dropdown"]').first();
-    await btn.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
-    await btn.scrollIntoViewIfNeeded().catch(() => {});
-    await btn.click().catch(() => {});
+  // ADIM 4: "Devam" butonuna tıkla
+  console.log('ADIM 4: Devam butonuna tıklanıyor...');
+  const continueBtn = page.locator('[data-cy="continue-button"]').first();
+  await continueBtn.waitFor({ state: 'attached', timeout: 30000 });
+  await continueBtn.scrollIntoViewIfNeeded().catch(() => {});
+  await continueBtn.click();
+  await sleep(page, waitBefore);
+  console.log('Sevk Detayları sayfası:', page.url());
+
+  // ADIM 5: Tarih seç
+  if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
+    console.log('ADIM 5: Tarih seçiliyor...', deliveryDateText);
+    const wanted = String(deliveryDateText).trim();
+
+    const dropdownBtn = page.locator('[data-cy="delivery-date-dropdown"]').first();
+    await dropdownBtn.waitFor({ state: 'attached', timeout: 30000 });
+    await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await dropdownBtn.click();
     await sleep(page, 1000);
 
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
-    await menu.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
+    await menu.waitFor({ state: 'attached', timeout: 30000 });
+    const allOptions = await menu.locator('li').allTextContents().catch(() => []);
 
-    const allOptions = await menu.locator("li").allTextContents().catch(() => []);
-    const wanted = String(deliveryDateText).trim();
+    // recording'deki data-cy ile önce dene, sonra text ile
+    let hitLi = menu.locator('[data-cy="click-set-dateparentindex-account-date"]')
+      .filter({ hasText: wanted }).first();
 
-    let hitLi = menu.locator("li").filter({ hasText: wanted }).first();
+    if ((await hitLi.count()) === 0)
+      hitLi = menu.locator('li').filter({ hasText: wanted }).first();
+
     if ((await hitLi.count()) === 0) {
       const dayMatch = wanted.match(/(\d+)/);
-      if (dayMatch) hitLi = menu.locator("li").filter({ hasText: dayMatch[1] }).first();
+      if (dayMatch) hitLi = menu.locator('li').filter({ hasText: dayMatch[1] }).first();
     }
 
     if ((await hitLi.count()) === 0) {
       return {
         ok: false, status: 404,
         error: `Tarih bulunamadı: ${wanted}`,
-        availableDates: allOptions.map(x => (x || "").trim()).filter(Boolean),
+        availableDates: allOptions.map(x => (x || '').trim()).filter(Boolean),
         ...result,
       };
     }
 
-    const selectedText = await hitLi.textContent().catch(() => "");
-    await hitLi.scrollIntoViewIfNeeded().catch(() => {});
-    await hitLi.click().catch(() => {});
-    await sleep(page, 1000);
+    // recording'de <a> tag'ine tıklanıyor
+    const anchor = hitLi.locator('a').first();
+    const clickTarget = (await anchor.count()) > 0 ? anchor : hitLi;
+    const selectedText = await hitLi.textContent().catch(() => '');
+    await clickTarget.scrollIntoViewIfNeeded().catch(() => {});
+    await clickTarget.click();
+    await sleep(page, 2000);
 
     result.deliveryDateSelected = true;
-    result.selectedDateText = selectedText;
-  } else if (setResult?.dateSet) {
-    result.deliveryDateSelected = true;
-    result.selectedDateText = setResult.selectedDateValue;
+    result.selectedDateText = selectedText.trim();
+    console.log('Tarih seçildi:', result.selectedDateText);
   }
 
-  // Sayfayı reload et - Angular taze yüklensin, hata state temizlensin
-  console.log("Sayfa reload ediliyor - Angular state temizleniyor...");
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await sleep(page, 8000);
-
-  // 3) Gönder - Reload sonrası taze sayfada submit
+  // ADIM 6: Gönder butonuna tıkla
   if (submit) {
+    console.log('ADIM 6: Gönder butonuna tıklanıyor...');
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
-    await submitBtn.waitFor({ state: "attached", timeout: 60000 });
-
+    await submitBtn.waitFor({ state: 'attached', timeout: 60000 });
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
 
-    // Buton disabled ise enabled olana kadar bekle (max 30 sn)
-    let btnEnabled = false;
-    for (let i = 0; i < 30; i++) {
+    // Buton disabled ise bekle (max 15 sn)
+    for (let i = 0; i < 15; i++) {
       const isDisabled = await submitBtn.isDisabled().catch(() => true);
-      if (!isDisabled) { btnEnabled = true; break; }
-      console.log(`Submit butonu disabled, bekleniyor... (${i + 1}/30)`);
+      if (!isDisabled) break;
+      console.log(`Submit butonu disabled, bekleniyor... (${i + 1}/15)`);
       await sleep(page, 1000);
     }
 
-    if (!btnEnabled) {
-      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
-      return {
-        ok: false,
-        status: 500,
-        error: "Submit butonu 30 saniye sonra hâlâ disabled",
-        errorTexts: errorTexts.filter(Boolean),
-        ...result,
-      };
-    }
+    // Submit öncesi screenshot
+    const screenshotBase64 = await page.screenshot({ fullPage: false })
+      .then(buf => buf.toString('base64')).catch(() => null);
+    result.screenshotBase64 = screenshotBase64;
 
-    // Submit öncesi screenshot al
-    await page.screenshot({ path: '/tmp/before-submit.png', fullPage: true }).catch(() => {});
-    
-    // Submit öncesi sayfanın son halini logla
+    // Submit öncesi state
     const preSubmitState = await page.evaluate(() => {
       try {
         const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-        let scope = angular.element(btn).scope();
-        let s = scope;
-        let d = 0;
-        while (s && d < 15) {
+        let s = angular.element(btn).scope();
+        let depth = 0;
+        while (s && depth < 15) {
           if (s.account && s.account.Header) break;
-          s = s.$parent; d++;
+          s = s.$parent; depth++;
         }
         const h = s && s.account && s.account.Header;
         return {
           ReferenceNumber: h && h.ReferenceNumber,
           DeliveryDate: h && h.DeliveryDate,
           submitDisabled: s && s.submitDisabled,
-          btnDisabled: btn.getAttribute('disabled'),
-          btnClass: btn.className,
           url: window.location.href,
         };
       } catch(e) { return { error: e.message }; }
@@ -446,9 +357,8 @@ async function checkoutDelivery(page, params) {
     console.log('Pre-submit state:', JSON.stringify(preSubmitState));
     result.preSubmitState = preSubmitState;
 
-    // Angular'ın kendi event pipeline'ını tetiklemek için native Playwright click
     await submitBtn.click();
-    console.log('✅ Submit butonuna tıklandı (native click)');
+    console.log('✅ Gönder butonuna tıklandı');
     await sleep(page, 3000);
 
     // Confirmation bekle (max 90 sn)
@@ -456,37 +366,27 @@ async function checkoutDelivery(page, params) {
     for (let i = 0; i < 30; i++) {
       const currentUrl = page.url();
       console.log(`Check ${i + 1}/30: ${currentUrl}`);
-
       if (currentUrl.includes('/checkout/confirmation')) {
         confirmationReached = true;
         break;
       }
-
       await sleep(page, 3000);
     }
 
     if (confirmationReached) {
       result.submitted = true;
       result.confirmationUrl = page.url();
-      result.submitMethod = 'native-click';
-      await page.screenshot({ path: '/tmp/after-submit-success.png', fullPage: true }).catch(() => {});
     } else {
-      result.submitted = false;
-      result.confirmationUrl = page.url();
-      
-      // Screenshot'ı base64 olarak al
-      const screenshotBase64 = await page.screenshot({ fullPage: true }).then(buf => buf.toString('base64')).catch(() => null);
-      result.screenshotBase64 = screenshotBase64;
-
-      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i').allTextContents().catch(() => []);
-
+      const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i')
+        .allTextContents().catch(() => []);
+      const failScreenshot = await page.screenshot({ fullPage: false })
+        .then(buf => buf.toString('base64')).catch(() => null);
       return {
-        ok: false,
-        status: 500,
-        error: "Submit sonrası confirmation görülmedi",
+        ok: false, status: 500,
+        error: 'Submit sonrası confirmation görülmedi',
         currentUrl: page.url(),
-        submitMethod: 'native-click',
         errorTexts: errorTexts.filter(Boolean),
+        failScreenshot,
         ...result,
       };
     }
@@ -494,6 +394,7 @@ async function checkoutDelivery(page, params) {
 
   return result;
 }
+
 
 // ✅ SADECE LOGIN TEST
 app.post("/login-test", async (req, res) => {
