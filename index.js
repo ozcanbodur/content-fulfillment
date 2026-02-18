@@ -214,110 +214,167 @@ async function checkoutDelivery(page, params) {
     confirmationUrl: null,
   };
 
-  // Direkt delivery sayfasına git
+  // Delivery sayfasına git
   await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, waitBefore);
 
-  // 1) orderreference yaz - Angular ng-model'i doğru tetikle
-  if (orderRef && String(orderRef).trim().length > 0) {
-    const ref = page.locator('input[name="orderreference"]').first();
-    await ref.waitFor({ state: "attached", timeout: 60000 });
+  // Submit butonunun scope'unu bul - buradan account ve tüm model erişimi yapacağız
+  const scopeReady = await page.evaluate(() => {
+    try {
+      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+      if (!btn) return false;
+      const scope = angular.element(btn).scope();
+      return !!scope;
+    } catch(e) { return false; }
+  }).catch(() => false);
 
-    await ref.scrollIntoViewIfNeeded().catch(() => {});
-    await ref.click().catch(() => {});
-    await sleep(page, 200);
+  console.log('Angular scope hazır:', scopeReady);
 
-    // Angular ng-model'i tetiklemek için: focus → value set → input/change event → $apply
-    await ref.evaluate((el, val) => {
-      el.focus();
-      // Native value setter'ı bypass et (React/Angular için gerekli)
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      nativeInputValueSetter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new Event('blur', { bubbles: true }));
-      // Angular $digest tetikle
-      try {
-        const scope = angular.element(el).scope();
-        if (scope) scope.$apply();
-      } catch(e) {}
-    }, String(orderRef));
+  // 1) orderRef ve deliveryDate'i Angular scope'a direkt yaz
+  const setResult = await page.evaluate((params) => {
+    try {
+      const { orderRef, deliveryDateText } = params;
 
-    result.orderRefSet = true;
-    await sleep(page, 500);
+      // Submit butonunun scope'undan başla, submitOrder olan scope'u bul
+      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+      if (!btn) return { error: 'btn not found' };
+
+      let scope = angular.element(btn).scope();
+      let targetScope = scope;
+      let depth = 0;
+      while (targetScope && depth < 15) {
+        if (targetScope.account && targetScope.account.Header) break;
+        targetScope = targetScope.$parent;
+        depth++;
+      }
+
+      if (!targetScope || !targetScope.account) return { error: 'account scope bulunamadı' };
+
+      const account = targetScope.account;
+      const before = {
+        ReferenceNumber: account.Header.ReferenceNumber,
+        DeliveryDate: account.Header.DeliveryDate,
+      };
+
+      // 1a) orderRef'i Angular model'e direkt yaz
+      if (orderRef) {
+        account.Header.ReferenceNumber = orderRef;
+      }
+
+      // 1b) deliveryDate - dropdown'dan eşleşen option'ı bul ve set et
+      let dateSet = false;
+      let availableDates = [];
+      let selectedDateValue = null;
+
+      if (deliveryDateText && targetScope.deliveryDates) {
+        availableDates = targetScope.deliveryDates.map(d => ({
+          text: d.DeliveryDateDisplay || d.DisplayDate || d.Text || JSON.stringify(d),
+          value: d,
+        }));
+
+        const wanted = String(deliveryDateText).trim();
+        const match = targetScope.deliveryDates.find(d => {
+          const txt = (d.DeliveryDateDisplay || d.DisplayDate || d.Text || '');
+          return txt.includes(wanted) || wanted.includes(txt.trim()) || txt.trim().includes(wanted.split(' ')[0]);
+        });
+
+        if (match) {
+          // Angular'ın selectDeliveryDate veya benzeri fonksiyonu varsa çağır
+          if (typeof targetScope.selectDeliveryDate === 'function') {
+            targetScope.selectDeliveryDate(match);
+            dateSet = true;
+            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
+          } else if (typeof targetScope.setDeliveryDate === 'function') {
+            targetScope.setDeliveryDate(match);
+            dateSet = true;
+            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
+          } else {
+            // Direkt model'e yaz
+            account.Header.DeliveryDate = match.DeliveryDate || match.Value || match;
+            dateSet = true;
+            selectedDateValue = match.DeliveryDateDisplay || match.DisplayDate;
+          }
+        }
+      }
+
+      // $apply ile Angular'ı güncelle
+      targetScope.$apply();
+
+      return {
+        ok: true,
+        before,
+        after: {
+          ReferenceNumber: account.Header.ReferenceNumber,
+          DeliveryDate: account.Header.DeliveryDate,
+        },
+        dateSet,
+        availableDates: availableDates.slice(0, 10).map(d => d.text),
+        selectedDateValue,
+        deliveryDatesCount: targetScope.deliveryDates ? targetScope.deliveryDates.length : 0,
+      };
+    } catch(e) {
+      return { error: e.message, stack: e.stack };
+    }
+  }, { orderRef, deliveryDateText }).catch(e => ({ error: String(e) }));
+
+  console.log('Angular scope set result:', JSON.stringify(setResult));
+  result.scopeSetResult = setResult;
+
+  if (setResult && setResult.ok) {
+    result.orderRefSet = !!orderRef;
+    await sleep(page, 1000);
   }
 
-  // 2) teslim tarihi seç
-  if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
+  // 2) Tarih dropdown'dan seçilmediyse DOM ile dene (fallback)
+  if (deliveryDateText && (!setResult?.dateSet)) {
+    console.log('Scope ile tarih set edilemedi, DOM ile deneniyor...');
     const btn = page.locator('[data-cy="delivery-date-dropdown"]').first();
-    await btn.waitFor({ state: "attached", timeout: 60000 });
-
+    await btn.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
     await btn.scrollIntoViewIfNeeded().catch(() => {});
-    await btn.click({ force: true }).catch(() => {});
-    await sleep(page, 500);
+    await btn.click().catch(() => {});
+    await sleep(page, 1000);
 
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
-    await menu.waitFor({ state: "attached", timeout: 60000 });
+    await menu.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
 
     const allOptions = await menu.locator("li").allTextContents().catch(() => []);
-
     const wanted = String(deliveryDateText).trim();
-    
-    // Hem tam eşleşme hem de partial eşleşme dene
+
     let hitLi = menu.locator("li").filter({ hasText: wanted }).first();
-    
     if ((await hitLi.count()) === 0) {
-      // Tam eşleşme yoksa, partial dene
       const dayMatch = wanted.match(/(\d+)/);
-      if (dayMatch) {
-        const day = dayMatch[1];
-        hitLi = menu.locator("li").filter({ hasText: day }).first();
-      }
+      if (dayMatch) hitLi = menu.locator("li").filter({ hasText: dayMatch[1] }).first();
     }
 
     if ((await hitLi.count()) === 0) {
       return {
-        ok: false,
-        status: 404,
+        ok: false, status: 404,
         error: `Tarih bulunamadı: ${wanted}`,
-        availableDates: allOptions.map((x) => (x || "").trim()).filter(Boolean),
+        availableDates: allOptions.map(x => (x || "").trim()).filter(Boolean),
         ...result,
       };
     }
 
     const selectedText = await hitLi.textContent().catch(() => "");
-
     await hitLi.scrollIntoViewIfNeeded().catch(() => {});
     await hitLi.click().catch(() => {});
     await sleep(page, 1000);
 
     result.deliveryDateSelected = true;
     result.selectedDateText = selectedText;
-
-    // Angular $digest cycle'ını tetikle - form valid olsun
-    await page.evaluate(() => {
-      try {
-        const scope = angular.element(document.body).scope();
-        if (scope) {
-          scope.$apply();
-          scope.$digest();
-        }
-        // Tüm form elementlerine blur/change gönder
-        document.querySelectorAll('input, select, textarea').forEach(el => {
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          el.dispatchEvent(new Event('blur', { bubbles: true }));
-        });
-        // Tekrar $apply
-        const s2 = angular.element(document.body).scope();
-        if (s2) s2.$apply();
-      } catch (e) {
-        console.log("Angular digest hatası:", e);
-      }
-    }).catch(() => {});
-
-    await sleep(page, 3000);
+  } else if (setResult?.dateSet) {
+    result.deliveryDateSelected = true;
+    result.selectedDateText = setResult.selectedDateValue;
   }
+
+  // Angular'ı son kez sync et
+  await page.evaluate(() => {
+    try {
+      angular.element(document.body).scope().$apply();
+    } catch(e) {}
+  }).catch(() => {});
+
+  await sleep(page, 2000);
 
   // 3) Gönder - Gerçek DOM click ile Angular event pipeline'ını tetikle
   if (submit) {
