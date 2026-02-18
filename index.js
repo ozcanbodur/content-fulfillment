@@ -218,40 +218,32 @@ async function checkoutDelivery(page, params) {
   await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, waitBefore);
 
-  // 1) orderreference yaz
+  // 1) orderreference yaz - Angular ng-model'i doğru tetikle
   if (orderRef && String(orderRef).trim().length > 0) {
     const ref = page.locator('input[name="orderreference"]').first();
     await ref.waitFor({ state: "attached", timeout: 60000 });
 
     await ref.scrollIntoViewIfNeeded().catch(() => {});
-    await ref.click({ force: true }).catch(() => {});
-    await sleep(page, 150);
+    await ref.click().catch(() => {});
+    await sleep(page, 200);
 
-    // Select all + clear
-    await ref.fill("").catch(async () => {
-      // fallback: input event
-      await ref.evaluate((el) => {
-        el.value = "";
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    });
+    // Angular ng-model'i tetiklemek için: focus → value set → input/change event → $apply
+    await ref.evaluate((el, val) => {
+      el.focus();
+      // Native value setter'ı bypass et (React/Angular için gerekli)
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeInputValueSetter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+      // Angular $digest tetikle
+      try {
+        const scope = angular.element(el).scope();
+        if (scope) scope.$apply();
+      } catch(e) {}
+    }, String(orderRef));
 
-    // "typing" benzeri akış
-    const text = String(orderRef);
-    for (const ch of text) {
-      await ref.type(ch, { delay: 20 }).catch(async () => {
-        // fallback type çalışmazsa value append
-        await ref.evaluate((el, c) => {
-          el.value = (el.value || "") + c;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        }, ch);
-      });
-    }
-
-    await ref.dispatchEvent("change").catch(() => {});
-    await ref.dispatchEvent("blur").catch(() => {});
     result.orderRefSet = true;
-
     await sleep(page, 500);
   }
 
@@ -296,39 +288,35 @@ async function checkoutDelivery(page, params) {
     const selectedText = await hitLi.textContent().catch(() => "");
 
     await hitLi.scrollIntoViewIfNeeded().catch(() => {});
-    await hitLi.click({ force: true }).catch(() => {});
-    await sleep(page, 800);
+    await hitLi.click().catch(() => {});
+    await sleep(page, 1000);
 
     result.deliveryDateSelected = true;
     result.selectedDateText = selectedText;
-    
-    // Form validation trigger
+
+    // Angular $digest cycle'ını tetikle - form valid olsun
     await page.evaluate(() => {
       try {
-        const inputs = document.querySelectorAll('input, select');
-        inputs.forEach(input => {
-          input.dispatchEvent(new Event('blur', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        
         const scope = angular.element(document.body).scope();
         if (scope) {
           scope.$apply();
+          scope.$digest();
         }
-        
-        const forms = document.querySelectorAll('form');
-        forms.forEach(form => {
-          const formScope = angular.element(form).scope();
-          if (formScope && formScope.$$childHead && formScope.$$childHead.$validate) {
-            formScope.$$childHead.$validate();
-          }
+        // Tüm form elementlerine blur/change gönder
+        document.querySelectorAll('input, select, textarea').forEach(el => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
         });
+        // Tekrar $apply
+        const s2 = angular.element(document.body).scope();
+        if (s2) s2.$apply();
       } catch (e) {
-        console.log("Validation trigger hatası:", e);
+        console.log("Angular digest hatası:", e);
       }
     }).catch(() => {});
-    
-    await sleep(page, 5000);
+
+    await sleep(page, 3000);
   }
 
   // 3) Gönder - Gerçek DOM click ile Angular event pipeline'ını tetikle
