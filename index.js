@@ -606,6 +606,7 @@ app.post("/add-to-cart", async (req, res) => {
       summary,
       results,
       checkoutResult,
+      itemsDetailed: req.body.itemsDetailed ?? [],  // ← sadece bu satır eklendi
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
