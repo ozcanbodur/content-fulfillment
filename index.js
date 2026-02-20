@@ -192,6 +192,111 @@ async function addOneItem(page, item) {
 }
 
 /**
+ * Confirmation sayfasından fiyat ve sipariş bilgilerini çeker
+ */
+async function scrapeConfirmationPage(page) {
+  await sleep(page, 3000); // Sayfa tam yüklensin
+
+  return await page.evaluate(() => {
+    const accounts = [];
+
+    // Her hesap bloğunu gez
+    document.querySelectorAll('[ng-repeat="account in accounts"]').forEach(accountEl => {
+      const titleEl = accountEl.querySelector('h3.title');
+      const accountTitle = titleEl ? titleEl.textContent.trim() : '';
+
+      // Hesap detayları
+      const accountDetails = {};
+      accountEl.querySelectorAll('.account-header .checkout-field-row').forEach(row => {
+        const label = row.querySelector('.col-xs-3')?.textContent?.trim().replace(':', '') || '';
+        const value = row.querySelector('.col-xs-9')?.textContent?.trim() || '';
+        if (label && value) accountDetails[label] = value;
+      });
+
+      const orders = [];
+
+      // Her sipariş grubunu gez
+      accountEl.querySelectorAll('[ng-repeat="referenceGroup in account.Orders"]').forEach(orderEl => {
+        const deliveryDate = orderEl.querySelector('.bold-date')?.textContent?.trim() || '';
+        const items = [];
+
+        // Ürün satırlarını gez
+        orderEl.querySelectorAll('tbody [ng-repeat="item in referenceGroup.OrderItems"]').forEach(itemEl => {
+          const description = itemEl.querySelector('.p-description')?.textContent?.trim() || '';
+          const brandEl = itemEl.querySelector('.p-description + .ng-binding');
+          const brand = brandEl ? brandEl.textContent.trim().replace(/[()]/g, '').trim() : '';
+          const codeEl = itemEl.querySelector('.ng-binding:last-of-type');
+          const productCode = codeEl ? codeEl.textContent.trim().replace(/[\[\]]/g, '').trim() : '';
+
+          const sizeEl = itemEl.querySelector('[ng-if="item.Product.PackSize"]');
+          const size = sizeEl ? sizeEl.textContent.trim() : '';
+
+          const uomEl = itemEl.querySelector('[ng-if="item.UOMDesc"]');
+          const uom = uomEl ? uomEl.textContent.trim() : '';
+
+          const qtyEl = itemEl.querySelector('td.text-right .ng-binding');
+          const qty = qtyEl ? qtyEl.textContent.trim() : '';
+
+          // Fiyat hücreleri: Fiyat | Ara Toplam | KDV | Toplam
+          const priceCells = itemEl.querySelectorAll('td[ng-if="!hidePrice"], td[ng-if="!hidePrice && !hideTax"]');
+          const priceArr = Array.from(priceCells).map(td => td.textContent.trim());
+
+          items.push({
+            description,
+            brand,
+            productCode,
+            size,
+            uom,
+            qty,
+            unitPrice: priceArr[0] || '',
+            subTotal: priceArr[1] || '',
+            tax: priceArr[2] || '',
+            total: priceArr[3] || '',
+          });
+        });
+
+        // Sipariş grubu toplam satırı
+        const totalRow = orderEl.querySelector('tr.total-row');
+        const totalCells = totalRow ? totalRow.querySelectorAll('td[ng-if]') : [];
+        const totalArr = Array.from(totalCells).map(td => td.textContent.trim()).filter(t => t);
+
+        orders.push({
+          deliveryDate,
+          items,
+          groupSubTotal: totalArr[0] || '',
+          groupTax: totalArr[1] || '',
+          groupTotal: totalArr[2] || '',
+        });
+      });
+
+      accounts.push({
+        accountTitle,
+        accountDetails,
+        orders,
+      });
+    });
+
+    // Genel özet (sağ alt köşe)
+    const summary = {};
+    document.querySelectorAll('.checkout-summary .checkout-field-row').forEach(row => {
+      const label = row.querySelector('.col-xs-6:first-child')?.textContent?.trim() || '';
+      const value = row.querySelector('.col-xs-6:last-child .ng-binding')?.textContent?.trim() || '';
+      if (label && value) summary[label] = value;
+    });
+
+    // Genel sipariş bilgileri
+    const orderInfo = {};
+    document.querySelectorAll('.header-block .checkout-field-row').forEach(row => {
+      const label = row.querySelector('.col-xs-3')?.textContent?.trim().replace(':', '') || '';
+      const value = row.querySelector('.col-xs-9')?.textContent?.trim() || '';
+      if (label && value) orderInfo[label] = value;
+    });
+
+    return { accounts, summary, orderInfo };
+  }).catch(e => ({ error: String(e) }));
+}
+
+/**
  * Tam akış: Sepet ikonu → Siparişi Tamamla → Sipariş Detayları (ref yaz, Devam) →
  * Sipariş Sevk Detayları (tarih seç, Gönder) → Confirmation
  */
@@ -348,7 +453,6 @@ async function checkoutDelivery(page, params) {
         const h = s && s.account && s.account.Header;
         return {
           ReferenceNumber: h && h.ReferenceNumber,
-          DeliveryDate: h && h.DeliveryDate,
           submitDisabled: s && s.submitDisabled,
           url: window.location.href,
         };
@@ -376,6 +480,13 @@ async function checkoutDelivery(page, params) {
     if (confirmationReached) {
       result.submitted = true;
       result.confirmationUrl = page.url();
+
+      // ADIM 7: Confirmation sayfasından fiyat verilerini çek
+      console.log('ADIM 7: Confirmation sayfasından fiyat verileri çekiliyor...');
+      const confirmationData = await scrapeConfirmationPage(page);
+      result.confirmationData = confirmationData;
+      console.log('Confirmation verisi alındı:', JSON.stringify(confirmationData).slice(0, 200));
+
     } else {
       const errorTexts = await page.locator('text=/hata|error|başarısız|geçersiz|uyarı/i')
         .allTextContents().catch(() => []);
@@ -587,10 +698,8 @@ app.post("/debug-checkout-page", async (req, res) => {
         const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
         if (!btn) return { error: 'btn not found' };
         
-        // Submit butonunun scope'unu bul
         let scope = angular.element(btn).scope();
         
-        // Scope'ta submitOrder'ı bul (parent'lara çık)
         let targetScope = scope;
         let depth = 0;
         while (targetScope && depth < 15) {
@@ -602,7 +711,6 @@ app.post("/debug-checkout-page", async (req, res) => {
 
         if (!targetScope) return { error: 'scope with submitOrder not found' };
 
-        // Kritik değerleri oku
         const result = {
           submitDisabled: targetScope.submitDisabled,
           hasRestrictedDeliveryItems: targetScope.hasRestrictedDeliveryItems,
@@ -614,7 +722,6 @@ app.post("/debug-checkout-page", async (req, res) => {
           checkRestrictedProductResult: null,
         };
 
-        // Fonksiyonları çağır
         try { result.checkMinOrderSubmitResult = targetScope.checkMinOrderSubmit(); } catch(e) { result.checkMinOrderSubmitResult = 'ERROR: ' + e.message; }
         try { 
           const account = targetScope.account || (targetScope.accounts && targetScope.accounts[0]);
@@ -632,49 +739,11 @@ app.post("/debug-checkout-page", async (req, res) => {
       }
     }).catch(e => ({ error: String(e) }));
 
-    // Delivery date dropdown scope'unu tara
-    const deliveryDateScope = await page.evaluate(() => {
-      try {
-        const dropdown = document.querySelector('[data-cy="delivery-date-dropdown"]');
-        if (!dropdown) return { error: 'dropdown not found' };
-        let scope = angular.element(dropdown).scope();
-        let depth = 0;
-        const result = { levels: [] };
-        while (scope && depth < 20) {
-          const keys = Object.keys(scope).filter(k => !k.startsWith('$'));
-          const dateKeys = keys.filter(k =>
-            k.toLowerCase().includes('date') ||
-            k.toLowerCase().includes('delivery') ||
-            k.toLowerCase().includes('slot')
-          );
-          if (dateKeys.length > 0) {
-            const level = { depth, keys: dateKeys, values: {} };
-            dateKeys.forEach(k => {
-              const val = scope[k];
-              if (Array.isArray(val)) {
-                level.values[k] = val.slice(0, 3).map(d =>
-                  typeof d === 'object' ? JSON.stringify(d).slice(0, 300) : d
-                );
-              } else if (typeof val !== 'function') {
-                level.values[k] = typeof val === 'object' ?
-                  JSON.stringify(val).slice(0, 300) : val;
-              }
-            });
-            result.levels.push(level);
-          }
-          scope = scope.$parent;
-          depth++;
-        }
-        return result;
-      } catch(e) { return { error: e.message }; }
-    }).catch(e => ({ error: String(e) }));
-
     return res.json({
       ok: true,
       currentUrl: page.url(),
       submitBtnState,
       angularScope,
-      deliveryDateScope,
       inputs,
       errorMessages: errorMessages.filter(Boolean),
       fullHtml,
