@@ -13,7 +13,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT_STEP_MS = 10000; // min 10 sn (senin kuralın)
+const WAIT_STEP_MS = 10000;
 const BASE_URL = "https://www.mybidfood.com.tr";
 
 async function sleep(page, ms) {
@@ -22,105 +22,68 @@ async function sleep(page, ms) {
 
 async function login(page, username, password) {
   await page.goto(`${BASE_URL}/`, { waitUntil: "domcontentloaded" });
-
   const pass = page.locator('input[type="password"]').first();
   const user = page.locator('input[type="text"], input[type="email"]').first();
-
   const hasLoginForm = await pass.isVisible().catch(() => false);
-
   if (hasLoginForm) {
     await user.fill(username);
     await pass.fill(password);
     await pass.press("Enter").catch(() => {});
   }
-
   await page.waitForTimeout(1500);
-
   const passStillVisible = await pass.isVisible().catch(() => false);
   const currentUrl = page.url();
-
   const logoutLike = page.locator('text=/çıkış|logout|sign out/i');
   const hasLogout = (await logoutLike.count().catch(() => 0)) > 0;
-
   const errorLike = page.locator('text=/hatalı|yanlış|error|invalid/i');
   const hasError = (await errorLike.count().catch(() => 0)) > 0;
-
   const loggedIn = (!passStillVisible && hasLoginForm) || hasLogout;
-
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
-/**
- * Ürün search sayfasında ilgili productCode satırını bulur,
- * uom satırını seçer (ADET/KOLİ),
- * önce Ekle ile qty alanını açar,
- * sonra +/- ile hedef qty'ye gelince DURUR.
- */
 async function addOneItem(page, item) {
   const { productCode, uom, qty } = item || {};
   const requestedQty = Number(qty ?? 1);
-
   if (!productCode || !uom) {
     return { ok: false, status: 400, productCode, uom, error: "productCode ve uom zorunlu" };
   }
   if (!Number.isFinite(requestedQty) || requestedQty < 1) {
     return { ok: false, status: 400, productCode, showUom: uom, error: "qty >= 1 olmalı" };
   }
-
   const currentPageUrl = page.url();
   const userPathMatch2 = currentPageUrl.match(/mybidfood\.com\.tr(\/u\/[^/#]+)/);
   const userBasePath2 = userPathMatch2 ? userPathMatch2[1] : '';
-  const productUrl = `${BASE_URL}${userBasePath2}/#/products/search/?searchTerm=${encodeURIComponent(
-    productCode
-  )}&category=All&page=1&useUrlParams=true`;
-
+  const productUrl = `${BASE_URL}${userBasePath2}/#/products/search/?searchTerm=${encodeURIComponent(productCode)}&category=All&page=1&useUrlParams=true`;
   await page.goto(productUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, 2000);
   await sleep(page, WAIT_STEP_MS);
-
   const row = page.locator(`#product-list-${productCode}`).first();
   if ((await row.count()) === 0) {
     return { ok: false, status: 404, productCode, uom, error: `Ürün bloğu yok: ${productCode}`, productUrl };
   }
-
   const uomUpper = String(uom).trim().toUpperCase();
   const uomType = row.locator(".UOM .type").filter({ hasText: uomUpper }).first();
-
   if ((await uomType.count()) === 0) {
     const availableUoms = await row.locator(".UOM .type").allTextContents().catch(() => []);
-    return {
-      ok: false,
-      status: 404,
-      productCode,
-      uom,
-      error: `UOM bulunamadı: ${uomUpper}`,
-      availableUoms: availableUoms.map((x) => (x || "").trim()).filter(Boolean),
-      productUrl,
-    };
+    return { ok: false, status: 404, productCode, uom, error: `UOM bulunamadı: ${uomUpper}`, availableUoms: availableUoms.map((x) => (x || "").trim()).filter(Boolean), productUrl };
   }
-
   const scope = uomType.locator("xpath=ancestor::tr[1]").first();
-
   const addBtn   = scope.locator('button[data-cy="click-set-add-stateprice"]').first();
   const plusBtn  = scope.locator('button[data-cy="click-increase-qtyprice"]').first();
   const minusBtn = scope.locator('button[data-cy="click-decrease-qtyprice"]').first();
   const qtyInput = scope.locator('input[data-cy="click-input-qty"]').first();
-
   if ((await addBtn.count()) > 0) {
     await addBtn.scrollIntoViewIfNeeded().catch(() => {});
     await addBtn.click({ force: true }).catch(() => {});
     await sleep(page, 500);
     await sleep(page, WAIT_STEP_MS);
   }
-
   await qtyInput.waitFor({ state: "attached", timeout: 60000 }).catch(() => {});
-
   const readQty = async () => {
     const v = await qtyInput.inputValue().catch(() => "");
     const n = parseInt(String(v || "0"), 10);
     return Number.isFinite(n) ? n : null;
   };
-
   let safety = 40;
   while (safety-- > 0) {
     const cur = await readQty();
@@ -129,240 +92,124 @@ async function addOneItem(page, item) {
     await minusBtn.click({ force: true }).catch(() => {});
     await sleep(page, WAIT_STEP_MS);
   }
-
   let guard = 80;
   while (guard-- > 0) {
     const cur = await readQty();
     if (cur === requestedQty) break;
-
-    if (cur === null) {
-      return { ok: false, status: 500, productCode, uom: uomUpper, error: "Qty input okunamadı", productUrl };
-    }
-
+    if (cur === null) return { ok: false, status: 500, productCode, uom: uomUpper, error: "Qty input okunamadı", productUrl };
     if (cur < requestedQty) {
-      if ((await plusBtn.count()) === 0) {
-        return { ok: false, status: 500, productCode, uom: uomUpper, error: "Plus yok", productUrl };
-      }
+      if ((await plusBtn.count()) === 0) return { ok: false, status: 500, productCode, uom: uomUpper, error: "Plus yok", productUrl };
       await plusBtn.click({ force: true }).catch(() => {});
       await sleep(page, WAIT_STEP_MS);
       continue;
     }
-
-    if ((await minusBtn.count()) === 0) {
-      return { ok: false, status: 500, productCode, uom: uomUpper, error: "Minus yok", productUrl };
-    }
+    if ((await minusBtn.count()) === 0) return { ok: false, status: 500, productCode, uom: uomUpper, error: "Minus yok", productUrl };
     await minusBtn.click({ force: true }).catch(() => {});
     await sleep(page, WAIT_STEP_MS);
   }
-
   const finalQty = await readQty();
-
   if (finalQty !== requestedQty) {
-    return {
-      ok: false,
-      status: 500,
-      productCode,
-      uom: uomUpper,
-      requestedQty,
-      finalQty,
-      productUrl,
-      error: "Hedef qty'ye ulaşılamadı",
-    };
+    return { ok: false, status: 500, productCode, uom: uomUpper, requestedQty, finalQty, productUrl, error: "Hedef qty'ye ulaşılamadı" };
   }
-
-  return {
-    ok: true,
-    productCode,
-    uom: uomUpper,
-    requestedQty,
-    finalQty,
-    productUrl,
-    note: "Akış: login -> search -> UOM satırı seçildi -> Ekle ile qty alanı açıldı -> +/- ile hedef qty'ye gelince durdu.",
-  };
+  return { ok: true, productCode, uom: uomUpper, requestedQty, finalQty, productUrl };
 }
 
-/**
- * Confirmation sayfasından sipariş bilgilerini çeker.
- * YENİ: webOrderRef (data-cy="web-order-reference") ve item.size (Boyut/Adet sütunu) eklendi.
- */
 async function scrapeConfirmationPage(page) {
   await page.waitForTimeout(1500);
-
   return await page.evaluate(() => {
     const text = (el) => (el?.textContent ?? "").replace(/\s+/g, " ").trim();
-
-    // Üst sipariş bilgileri (Kullanıcı Adı, E-posta, Sipariş Tarihi)
     const orderInfo = {};
     document.querySelectorAll(".header-block .checkout-field-row").forEach((row) => {
       const label = text(row.querySelector(".col-xs-3"))?.replace(":", "");
       const value = text(row.querySelector(".col-xs-9"));
       if (label) orderInfo[label] = value || "";
     });
-
     const accounts = [];
-    document
-      .querySelectorAll('.account-wrap[ng-repeat="account in accounts"]')
-      .forEach((accountEl) => {
-        // Başlık: "AKD-ANA DEPO - ACN01783"
-        const title = text(accountEl.querySelector("h3.title"));
-        let accountTitle = "";
-        let accountCodeFromTitle = "";
-        const parts = title.split(" - ").map((s) => s.trim()).filter(Boolean);
-        if (parts.length >= 2) {
-          accountTitle = parts[0];
-          accountCodeFromTitle = parts[1];
-        } else {
-          accountTitle = title;
-        }
-
-        // Hesap header alanları
-        const header = accountEl.querySelector(".account-header");
-        const accountDetails = {};
-        if (header) {
-          header.querySelectorAll(".checkout-field-row").forEach((row) => {
-            const label = text(row.querySelector(".col-xs-3"))?.replace(":", "");
-            const valueCol = row.querySelector(".col-xs-9");
-            if (!label || !valueCol) return;
-
-            if (label.toLowerCase().includes("sevk adresi")) {
-              const lines = Array.from(valueCol.querySelectorAll(".ng-binding"))
-                .map(text)
-                .filter(Boolean);
-              accountDetails[label] = lines;
-            } else {
-              accountDetails[label] = text(valueCol);
-            }
-          });
-        }
-
-        // ── YENİ: Web sipariş referansı ──
-        const webOrderRefEl = accountEl.querySelector('[data-cy="web-order-reference"]');
-        const webOrderRef = webOrderRefEl ? text(webOrderRefEl) : "";
-        if (webOrderRef) accountDetails["Web Sipariş Ref"] = webOrderRef;
-
-        // Sipariş grupları
-        const orders = [];
-        accountEl
-          .querySelectorAll('[ng-repeat="referenceGroup in account.Orders"]')
-          .forEach((groupEl) => {
-            const deliveryDate = text(groupEl.querySelector(".bold-date"));
-
-            const items = [];
-            groupEl
-              .querySelectorAll('tbody tr[ng-repeat="item in referenceGroup.OrderItems"]')
-              .forEach((itemEl) => {
-                const tds = itemEl.querySelectorAll("td");
-                if (tds.length < 3) return;
-
-                // Ürün adı hücresi
-                const productCell = itemEl.querySelector("td.product") || tds[0];
-                const productText = text(productCell);
-
-                const codeMatch = productText.match(/\[([A-Z0-9]+)\]/i);
-                const productCode = codeMatch ? codeMatch[1].trim() : "";
-
-                const brandMatch = productText.match(/\(([^)]+)\)/);
-                const brand = brandMatch ? brandMatch[1].trim() : "";
-
-                const descEl = productCell.querySelector(".p-description");
-                let description = descEl ? text(descEl) : productText;
-                if (!descEl) {
-                  description = description
-                    .replace(/\([^)]+\)/, "")
-                    .replace(/\[[^\]]+\]/, "")
-                    .trim();
-                }
-
-                // ── YENİ: Boyut/Adet sütunu (tds[1]) ──
-                const sizeUnitCell = tds[1];
-                const sizeEl = sizeUnitCell.querySelector('[ng-if="item.Product.PackSize"]');
-                const uomEl  = sizeUnitCell.querySelector('[ng-if="item.UOMDesc"]');
-                const size = sizeEl ? text(sizeEl).replace(/\/\s*$/, "").trim() : "";
-                const uom  = uomEl  ? text(uomEl) : "";
-
-                // Miktar (tds[2])
-                const qty = text(tds[2].querySelector(".ng-binding")) || text(tds[2]) || "";
-
-                // Fiyat kolonları: [Fiyat, AraToplam, KDV, Toplam]
-                const rightTds = Array.from(itemEl.querySelectorAll("td.text-right"));
-                const priceTds = rightTds.slice(1);
-
-                const unitPrice = text(priceTds[0]) || "";
-                const subTotal  = text(priceTds[1]) || "";
-                const tax       = text(priceTds[2]) || "";
-                const total     = text(priceTds[3]) || "";
-
-                items.push({
-                  description,
-                  brand,
-                  productCode,
-                  size,   // ← YENİ: örn. "720 gr"
-                  uom,
-                  qty,
-                  unitPrice,
-                  subTotal,
-                  tax,
-                  total,
-                });
-              });
-
-            orders.push({ deliveryDate, items });
-          });
-
-        accounts.push({
-          accountTitle,
-          accountCode: accountDetails["Hesap Kodu"] || accountCodeFromTitle || "",
-          accountDetails, // webOrderRef burada
-          orders,
+    document.querySelectorAll('.account-wrap[ng-repeat="account in accounts"]').forEach((accountEl) => {
+      const title = text(accountEl.querySelector("h3.title"));
+      let accountTitle = "";
+      let accountCodeFromTitle = "";
+      const parts = title.split(" - ").map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2) { accountTitle = parts[0]; accountCodeFromTitle = parts[1]; }
+      else { accountTitle = title; }
+      const header = accountEl.querySelector(".account-header");
+      const accountDetails = {};
+      if (header) {
+        header.querySelectorAll(".checkout-field-row").forEach((row) => {
+          const label = text(row.querySelector(".col-xs-3"))?.replace(":", "");
+          const valueCol = row.querySelector(".col-xs-9");
+          if (!label || !valueCol) return;
+          if (label.toLowerCase().includes("sevk adresi")) {
+            const lines = Array.from(valueCol.querySelectorAll(".ng-binding")).map(text).filter(Boolean);
+            accountDetails[label] = lines;
+          } else {
+            accountDetails[label] = text(valueCol);
+          }
         });
+      }
+      const webOrderRefEl = accountEl.querySelector('[data-cy="web-order-reference"]');
+      const webOrderRef = webOrderRefEl ? text(webOrderRefEl) : "";
+      if (webOrderRef) accountDetails["Web Sipariş Ref"] = webOrderRef;
+      const orders = [];
+      accountEl.querySelectorAll('[ng-repeat="referenceGroup in account.Orders"]').forEach((groupEl) => {
+        const deliveryDate = text(groupEl.querySelector(".bold-date"));
+        const items = [];
+        groupEl.querySelectorAll('tbody tr[ng-repeat="item in referenceGroup.OrderItems"]').forEach((itemEl) => {
+          const tds = itemEl.querySelectorAll("td");
+          if (tds.length < 3) return;
+          const productCell = itemEl.querySelector("td.product") || tds[0];
+          const productText = text(productCell);
+          const codeMatch = productText.match(/\[([A-Z0-9]+)\]/i);
+          const productCode = codeMatch ? codeMatch[1].trim() : "";
+          const brandMatch = productText.match(/\(([^)]+)\)/);
+          const brand = brandMatch ? brandMatch[1].trim() : "";
+          const descEl = productCell.querySelector(".p-description");
+          let description = descEl ? text(descEl) : productText;
+          if (!descEl) { description = description.replace(/\([^)]+\)/, "").replace(/\[[^\]]+\]/, "").trim(); }
+          const sizeUnitCell = tds[1];
+          const sizeEl = sizeUnitCell.querySelector('[ng-if="item.Product.PackSize"]');
+          const uomEl  = sizeUnitCell.querySelector('[ng-if="item.UOMDesc"]');
+          const size = sizeEl ? text(sizeEl).replace(/\/\s*$/, "").trim() : "";
+          const uom  = uomEl  ? text(uomEl) : "";
+          const qty = text(tds[2].querySelector(".ng-binding")) || text(tds[2]) || "";
+          const rightTds = Array.from(itemEl.querySelectorAll("td.text-right"));
+          const priceTds = rightTds.slice(1);
+          const unitPrice = text(priceTds[0]) || "";
+          const subTotal  = text(priceTds[1]) || "";
+          const tax       = text(priceTds[2]) || "";
+          const total     = text(priceTds[3]) || "";
+          items.push({ description, brand, productCode, size, uom, qty, unitPrice, subTotal, tax, total });
+        });
+        orders.push({ deliveryDate, items });
       });
-
-    // Genel özet (Ara toplam, KDV, Toplam vb.)
+      accounts.push({ accountTitle, accountCode: accountDetails["Hesap Kodu"] || accountCodeFromTitle || "", accountDetails, orders });
+    });
     const summary = {};
     document.querySelectorAll(".checkout-summary .checkout-field-row").forEach((row) => {
       const label = text(row.querySelector(".col-xs-6:first-child"));
       const value = text(row.querySelector(".col-xs-6:last-child"));
       if (label) summary[label] = value || "";
     });
-
     return { orderInfo, accounts, summary };
   }).catch((e) => ({ error: String(e) }));
 }
 
-/**
- * Tam akış: Sepet ikonu → Siparişi Tamamla → Sipariş Detayları (ref yaz, Devam) →
- * Sipariş Sevk Detayları (tarih seç, Gönder) → Confirmation
- */
 async function checkoutDelivery(page, params) {
   const { orderRef, deliveryDateText, submit = true, waitBefore = 5000 } = params || {};
+  const result = { ok: true, orderRef: orderRef ?? null, deliveryDateText: deliveryDateText ?? null, submit: !!submit, orderRefSet: false, deliveryDateSelected: false, submitted: false, confirmationUrl: null };
 
-  const result = {
-    ok: true,
-    orderRef: orderRef ?? null,
-    deliveryDateText: deliveryDateText ?? null,
-    submit: !!submit,
-    orderRefSet: false,
-    deliveryDateSelected: false,
-    submitted: false,
-    confirmationUrl: null,
-  };
-
-  // ADIM 1: Sepet ikonuna tıkla
   console.log("ADIM 1: Sepet ikonuna tıklanıyor...");
   const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
   await cartIcon.waitFor({ state: "attached", timeout: 30000 });
   await cartIcon.click();
   await sleep(page, 2000);
 
-  // ADIM 2: "Siparişi Tamamla" butonuna tıkla
   console.log("ADIM 2: Siparişi Tamamla tıklanıyor...");
   const checkoutBtn = page.locator('[data-cy="click-checkout-landing"]').first();
   await checkoutBtn.waitFor({ state: "attached", timeout: 30000 });
   await checkoutBtn.click();
   await sleep(page, waitBefore);
-  console.log("Sipariş Detayları sayfası:", page.url());
 
-  // ADIM 3: OrderRef yaz
   if (orderRef && String(orderRef).trim().length > 0) {
     console.log("ADIM 3: OrderRef yazılıyor...", orderRef);
     const refInput = page.locator('[data-cy="headerOrderRef"]').first();
@@ -370,194 +217,111 @@ async function checkoutDelivery(page, params) {
     await refInput.scrollIntoViewIfNeeded().catch(() => {});
     await refInput.click();
     await sleep(page, 200);
-
     await refInput.selectText().catch(() => {});
     await refInput.fill(String(orderRef));
-
     await refInput.evaluate((el) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.dispatchEvent(new Event("blur", { bubbles: true }));
-      try {
-        const s = angular.element(el).scope();
-        if (s) s.$apply();
-      } catch (e) {}
+      try { const s = angular.element(el).scope(); if (s) s.$apply(); } catch (e) {}
     });
-
     await sleep(page, 500);
     result.orderRefSet = true;
   }
 
-  // ADIM 4: "Devam" butonuna tıkla
   console.log("ADIM 4: Devam butonuna tıklanıyor...");
   const continueBtn = page.locator('[data-cy="continue-button"]').first();
   await continueBtn.waitFor({ state: "attached", timeout: 30000 });
   await continueBtn.scrollIntoViewIfNeeded().catch(() => {});
   await continueBtn.click();
   await sleep(page, waitBefore);
-  console.log("Sevk Detayları sayfası:", page.url());
 
-  // ADIM 5: Tarih seç
   if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
     console.log("ADIM 5: Tarih seçiliyor...", deliveryDateText);
     const wanted = String(deliveryDateText).trim();
-
     const dropdownBtn = page.locator('[data-cy="delivery-date-dropdown"]').first();
     await dropdownBtn.waitFor({ state: "attached", timeout: 30000 });
     await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
     await dropdownBtn.click();
     await sleep(page, 1000);
-
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
     await menu.waitFor({ state: "attached", timeout: 30000 });
     const allOptions = await menu.locator("li").allTextContents().catch(() => []);
-
-    let hitLi = menu
-      .locator('[data-cy="click-set-dateparentindex-account-date"]')
-      .filter({ hasText: wanted })
-      .first();
-
+    let hitLi = menu.locator('[data-cy="click-set-dateparentindex-account-date"]').filter({ hasText: wanted }).first();
     if ((await hitLi.count()) === 0) hitLi = menu.locator("li").filter({ hasText: wanted }).first();
-
     if ((await hitLi.count()) === 0) {
       const dayMatch = wanted.match(/(\d+)/);
       if (dayMatch) hitLi = menu.locator("li").filter({ hasText: dayMatch[1] }).first();
     }
-
     if ((await hitLi.count()) === 0) {
-      return {
-        ok: false,
-        status: 404,
-        error: `Tarih bulunamadı: ${wanted}`,
-        availableDates: allOptions.map((x) => (x || "").trim()).filter(Boolean),
-        ...result,
-      };
+      return { ok: false, status: 404, error: `Tarih bulunamadı: ${wanted}`, availableDates: allOptions.map((x) => (x || "").trim()).filter(Boolean), ...result };
     }
-
     const anchor = hitLi.locator("a").first();
     const clickTarget = (await anchor.count()) > 0 ? anchor : hitLi;
     const selectedText = await hitLi.textContent().catch(() => "");
     await clickTarget.scrollIntoViewIfNeeded().catch(() => {});
     await clickTarget.click();
     await sleep(page, 2000);
-
     result.deliveryDateSelected = true;
     result.selectedDateText = (selectedText || "").trim();
     console.log("Tarih seçildi:", result.selectedDateText);
   }
 
-  // ADIM 6: Gönder butonuna tıkla
   if (submit) {
     console.log("ADIM 6: Gönder butonuna tıklanıyor...");
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-
     for (let i = 0; i < 15; i++) {
       const isDisabled = await submitBtn.isDisabled().catch(() => true);
       if (!isDisabled) break;
-      console.log(`Submit butonu disabled, bekleniyor... (${i + 1}/15)`);
       await sleep(page, 1000);
     }
-
-    const screenshotBase64 = await page
-      .screenshot({ fullPage: false })
-      .then((buf) => buf.toString("base64"))
-      .catch(() => null);
+    const screenshotBase64 = await page.screenshot({ fullPage: false }).then((buf) => buf.toString("base64")).catch(() => null);
     result.screenshotBase64 = screenshotBase64;
-
-    const preSubmitState = await page
-      .evaluate(() => {
-        try {
-          const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-          let s = angular.element(btn).scope();
-          let depth = 0;
-          while (s && depth < 15) {
-            if (s.account && s.account.Header) break;
-            s = s.$parent;
-            depth++;
-          }
-          const h = s && s.account && s.account.Header;
-          return {
-            ReferenceNumber: h && h.ReferenceNumber,
-            submitDisabled: s && s.submitDisabled,
-            url: window.location.href,
-          };
-        } catch (e) {
-          return { error: e.message };
-        }
-      })
-      .catch((e) => ({ error: String(e) }));
-    console.log("Pre-submit state:", JSON.stringify(preSubmitState));
+    const preSubmitState = await page.evaluate(() => {
+      try {
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        let s = angular.element(btn).scope();
+        let depth = 0;
+        while (s && depth < 15) { if (s.account && s.account.Header) break; s = s.$parent; depth++; }
+        const h = s && s.account && s.account.Header;
+        return { ReferenceNumber: h && h.ReferenceNumber, submitDisabled: s && s.submitDisabled, url: window.location.href };
+      } catch (e) { return { error: e.message }; }
+    }).catch((e) => ({ error: String(e) }));
     result.preSubmitState = preSubmitState;
-
     await submitBtn.click();
     console.log("✅ Gönder butonuna tıklandı");
     await sleep(page, 3000);
-
-    // Confirmation bekle (max 90 sn)
     let confirmationReached = false;
     for (let i = 0; i < 30; i++) {
       const currentUrl = page.url();
-      console.log(`Check ${i + 1}/30: ${currentUrl}`);
-      if (currentUrl.includes("/checkout/confirmation")) {
-        confirmationReached = true;
-        break;
-      }
+      if (currentUrl.includes("/checkout/confirmation")) { confirmationReached = true; break; }
       await sleep(page, 3000);
     }
-
     if (confirmationReached) {
       result.submitted = true;
       result.confirmationUrl = page.url();
-
       await page.waitForSelector(".checkout-block", { timeout: 60000 }).catch(() => {});
-      await page
-        .waitForSelector('.account-wrap[ng-repeat="account in accounts"]', { timeout: 60000 })
-        .catch(() => {});
-
-      // ADIM 7: Confirmation verilerini çek
+      await page.waitForSelector('.account-wrap[ng-repeat="account in accounts"]', { timeout: 60000 }).catch(() => {});
       console.log("ADIM 7: Confirmation sayfasından veriler çekiliyor...");
       const confirmationData = await scrapeConfirmationPage(page);
       result.confirmationData = confirmationData;
-      console.log("Confirmation verisi alındı:", JSON.stringify(confirmationData).slice(0, 200));
     } else {
-      const errorTexts = await page
-        .locator("text=/hata|error|başarısız|geçersiz|uyarı/i")
-        .allTextContents()
-        .catch(() => []);
-      const failScreenshot = await page
-        .screenshot({ fullPage: false })
-        .then((buf) => buf.toString("base64"))
-        .catch(() => null);
-      return {
-        ok: false,
-        status: 500,
-        error: "Submit sonrası confirmation görülmedi",
-        currentUrl: page.url(),
-        errorTexts: errorTexts.filter(Boolean),
-        failScreenshot,
-        ...result,
-      };
+      const errorTexts = await page.locator("text=/hata|error|başarısız|geçersiz|uyarı/i").allTextContents().catch(() => []);
+      const failScreenshot = await page.screenshot({ fullPage: false }).then((buf) => buf.toString("base64")).catch(() => null);
+      return { ok: false, status: 500, error: "Submit sonrası confirmation görülmedi", currentUrl: page.url(), errorTexts: errorTexts.filter(Boolean), failScreenshot, ...result };
     }
   }
-
   return result;
 }
 
-// ✅ SADECE LOGIN TEST
 app.post("/login-test", async (req, res) => {
   const { username, password } = req.body || {};
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
-
   try {
     const result = await withTimeout(login(page, username, password), 60000);
     res.json({ ok: true, ...result });
@@ -568,46 +332,24 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ TEK ÜRÜN + (opsiyonel) checkout
 app.post("/add-to-cart", async (req, res) => {
   const { username, password, productCode, uom, qty, checkout } = req.body || {};
-
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
-
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
-
     const itemResult = await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
-
     let checkoutResult = null;
     if (checkout && itemResult.ok) {
       checkoutResult = await withTimeout(checkoutDelivery(page, checkout), 180000, "CHECKOUT_TIMEOUT");
     }
-
     const results = [itemResult];
-    const summary = {
-      total: 1,
-      done: itemResult.ok ? 1 : 0,
-      failed: itemResult.ok ? 0 : 1,
-    };
-
-    return res.json({
-      ok: itemResult.ok && (!checkout || (checkoutResult && checkoutResult.ok)),
-      summary,
-      results,
-      checkoutResult,
-      itemsDetailed: req.body.itemsDetailed ?? [],  // ← sadece bu satır eklendi
-    });
+    const summary = { total: 1, done: itemResult.ok ? 1 : 0, failed: itemResult.ok ? 0 : 1 };
+    return res.json({ ok: itemResult.ok && (!checkout || (checkoutResult && checkoutResult.ok)), summary, results, checkoutResult });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
@@ -617,16 +359,13 @@ app.post("/add-to-cart", async (req, res) => {
 
 // ✅ ÇOKLU ÜRÜN: batch + (opsiyonel) checkout
 app.post("/add-to-cart-batch", async (req, res) => {
-  const { username, password, items, stopOnError = true, checkout } = req.body || {};
+  // ← itemsDetailed burada alınıyor
+  const { username, password, items, stopOnError = true, checkout, itemsDetailed = [] } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ ok: false, error: "items[] zorunlu" });
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
@@ -639,9 +378,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
     for (const it of items) {
       const r = await withTimeout(addOneItem(page, it), 180000, "ITEM_TIMEOUT");
       results.push(r);
-
       if (!r.ok && stopOnError) break;
-
       await sleep(page, 1500);
     }
 
@@ -661,6 +398,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
       summary,
       results,
       checkoutResult,
+      itemsDetailed,  // ← PDF'ten gelen pdfTutar bilgileri geri dönüyor
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
@@ -669,125 +407,56 @@ app.post("/add-to-cart-batch", async (req, res) => {
   }
 });
 
-// 🔍 DEBUG: Checkout/delivery sayfasının tam DOM yapısını döker
 app.post("/debug-checkout-page", async (req, res) => {
   const { username, password, productCode, uom, qty, waitBefore = 10000 } = req.body || {};
-
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
-
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
-
-    if (productCode) {
-      await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
-    }
-
+    if (productCode) { await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT"); }
     const deliveryUrl = `${BASE_URL}/#/checkout/delivery`;
     await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(waitBefore);
-
     const fullHtml = await page.content();
-
-    const submitBtnState = await page
-      .evaluate(() => {
-        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-        if (!btn) return { found: false };
-        return {
-          found: true,
-          disabled: btn.disabled,
-          className: btn.className,
-          outerHTML: btn.outerHTML,
-          ngDisabled: btn.getAttribute("ng-disabled"),
-          ngClick: btn.getAttribute("ng-click"),
-        };
-      })
-      .catch((e) => ({ error: String(e) }));
-
-    const inputs = await page
-      .evaluate(() => {
-        return Array.from(document.querySelectorAll("input, select, textarea")).map((el) => ({
-          tag: el.tagName,
-          type: el.type,
-          name: el.name,
-          id: el.id,
-          value: el.value,
-          disabled: el.disabled,
-          ngModel: el.getAttribute("ng-model"),
-          dataCy: el.getAttribute("data-cy"),
-          placeholder: el.placeholder,
-        }));
-      })
-      .catch((e) => ({ error: String(e) }));
-
+    const submitBtnState = await page.evaluate(() => {
+      const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+      if (!btn) return { found: false };
+      return { found: true, disabled: btn.disabled, className: btn.className, outerHTML: btn.outerHTML, ngDisabled: btn.getAttribute("ng-disabled"), ngClick: btn.getAttribute("ng-click") };
+    }).catch((e) => ({ error: String(e) }));
+    const inputs = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("input, select, textarea")).map((el) => ({
+        tag: el.tagName, type: el.type, name: el.name, id: el.id, value: el.value,
+        disabled: el.disabled, ngModel: el.getAttribute("ng-model"), dataCy: el.getAttribute("data-cy"), placeholder: el.placeholder,
+      }));
+    }).catch((e) => ({ error: String(e) }));
     const errorMessages = await page.locator("text=/hata|error|uyarı|warning/i").allTextContents().catch(() => []);
-
-    const angularScope = await page
-      .evaluate(() => {
-        try {
-          const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
-          if (!btn) return { error: "btn not found" };
-
-          let scope = angular.element(btn).scope();
-          let targetScope = scope;
-          let depth = 0;
-          while (targetScope && depth < 15) {
-            if (typeof targetScope.submitOrder === "function" || typeof targetScope.checkMinOrderSubmit === "function") break;
-            targetScope = targetScope.$parent;
-            depth++;
-          }
-
-          if (!targetScope) return { error: "scope with submitOrder not found" };
-
-          const result = {
-            submitDisabled: targetScope.submitDisabled,
-            hasRestrictedDeliveryItems: targetScope.hasRestrictedDeliveryItems,
-            approvalNeeded: targetScope.approvalNeeded,
-            canTradeOnline: targetScope.canTradeOnline,
-            canAllowCredit: targetScope.canAllowCredit,
-            isApproverShadowSession: targetScope.isApproverShadowSession,
-            checkMinOrderSubmitResult: null,
-            checkRestrictedProductResult: null,
-          };
-
-          try { result.checkMinOrderSubmitResult = targetScope.checkMinOrderSubmit(); }
-          catch (e) { result.checkMinOrderSubmitResult = "ERROR: " + e.message; }
-
-          try {
-            const account = targetScope.account || (targetScope.accounts && targetScope.accounts[0]);
-            result.checkRestrictedProductResult = targetScope.checkRestrictedProduct(account);
-            result.account = {
-              ReferenceNumber: account && account.Header && account.Header.ReferenceNumber,
-              DeliveryDate: account && account.Header && account.Header.DeliveryDate,
-              HasItems: account && account.Entries && account.Entries.length,
-            };
-          } catch (e) { result.checkRestrictedProductResult = "ERROR: " + e.message; }
-
-          return result;
-        } catch (e) {
-          return { error: e.message };
+    const angularScope = await page.evaluate(() => {
+      try {
+        const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
+        if (!btn) return { error: "btn not found" };
+        let scope = angular.element(btn).scope();
+        let targetScope = scope;
+        let depth = 0;
+        while (targetScope && depth < 15) {
+          if (typeof targetScope.submitOrder === "function" || typeof targetScope.checkMinOrderSubmit === "function") break;
+          targetScope = targetScope.$parent; depth++;
         }
-      })
-      .catch((e) => ({ error: String(e) }));
-
-    return res.json({
-      ok: true,
-      currentUrl: page.url(),
-      submitBtnState,
-      angularScope,
-      inputs,
-      errorMessages: errorMessages.filter(Boolean),
-      fullHtml,
-    });
+        if (!targetScope) return { error: "scope with submitOrder not found" };
+        const result = { submitDisabled: targetScope.submitDisabled, hasRestrictedDeliveryItems: targetScope.hasRestrictedDeliveryItems, approvalNeeded: targetScope.approvalNeeded, canTradeOnline: targetScope.canTradeOnline, canAllowCredit: targetScope.canAllowCredit, isApproverShadowSession: targetScope.isApproverShadowSession, checkMinOrderSubmitResult: null, checkRestrictedProductResult: null };
+        try { result.checkMinOrderSubmitResult = targetScope.checkMinOrderSubmit(); } catch (e) { result.checkMinOrderSubmitResult = "ERROR: " + e.message; }
+        try {
+          const account = targetScope.account || (targetScope.accounts && targetScope.accounts[0]);
+          result.checkRestrictedProductResult = targetScope.checkRestrictedProduct(account);
+          result.account = { ReferenceNumber: account && account.Header && account.Header.ReferenceNumber, DeliveryDate: account && account.Header && account.Header.DeliveryDate, HasItems: account && account.Entries && account.Entries.length };
+        } catch (e) { result.checkRestrictedProductResult = "ERROR: " + e.message; }
+        return result;
+      } catch (e) { return { error: e.message }; }
+    }).catch((e) => ({ error: String(e) }));
+    return res.json({ ok: true, currentUrl: page.url(), submitBtnState, angularScope, inputs, errorMessages: errorMessages.filter(Boolean), fullHtml });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
