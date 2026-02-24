@@ -6,6 +6,43 @@ app.use(express.json());
 
 app.get("/", (req, res) => res.send("OK"));
 
+// =========================
+// QUEUE SİSTEMİ
+// =========================
+const queue = [];
+let isProcessing = false;
+
+async function processQueue() {
+  if (isProcessing || queue.length === 0) return;
+
+  isProcessing = true;
+  const { req, res, handler } = queue.shift();
+
+  console.log(`[QUEUE] İşlem başladı. Kuyrukta kalan: ${queue.length}`);
+
+  try {
+    await handler(req, res);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  } finally {
+    isProcessing = false;
+    console.log(`[QUEUE] İşlem bitti. Kuyrukta kalan: ${queue.length}`);
+    processQueue();
+  }
+}
+
+function enqueue(handler) {
+  return (req, res) => {
+    const position = queue.length + (isProcessing ? 1 : 0);
+    console.log(`[QUEUE] Yeni istek kuyruğa alındı. Sıra: ${position}`);
+    queue.push({ req, res, handler });
+    processQueue();
+  };
+}
+
+// =========================
+// HELPERS
+// =========================
 function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   return Promise.race([
     promise,
@@ -20,6 +57,9 @@ async function sleep(page, ms) {
   await page.waitForTimeout(ms);
 }
 
+// =========================
+// LOGIN
+// =========================
 async function login(page, username, password) {
   await page.goto(`${BASE_URL}/`, { waitUntil: "domcontentloaded" });
 
@@ -50,6 +90,48 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
+// =========================
+// SEPETİ TEMİZLE
+// =========================
+async function clearCart(page) {
+  console.log("Sepet temizleniyor...");
+
+  // Sepet ikonuna tıkla → yan panel açılır
+  const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
+  await cartIcon.waitFor({ state: "attached", timeout: 30000 });
+  await cartIcon.click();
+  await sleep(page, 2000);
+
+  // "Sepeti Sil" butonu var mı?
+  const clearBtn = page.locator('[data-cy="click-clear-cart"]').first();
+  const hasClearBtn = (await clearBtn.count()) > 0;
+
+  if (!hasClearBtn) {
+    console.log("Sepet zaten boş, temizleme atlanıyor.");
+    // Paneli kapat
+    await page.keyboard.press("Escape");
+    await sleep(page, 500);
+    return { cleared: false, reason: "Sepet zaten boştu" };
+  }
+
+  // Sepeti Sil'e tıkla
+  await clearBtn.scrollIntoViewIfNeeded().catch(() => {});
+  await clearBtn.click();
+  await sleep(page, 1000);
+
+  // Popup → Tamam
+  const okBtn = page.locator('[data-cy="modal-ok"]').first();
+  await okBtn.waitFor({ state: "attached", timeout: 10000 });
+  await okBtn.click();
+  await sleep(page, 2000);
+
+  console.log("✅ Sepet temizlendi.");
+  return { cleared: true };
+}
+
+// =========================
+// ÜRÜN EKLE
+// =========================
 async function addOneItem(page, item) {
   const { productCode, uom, qty } = item || {};
   const requestedQty = Number(qty ?? 1);
@@ -177,6 +259,9 @@ async function addOneItem(page, item) {
   };
 }
 
+// =========================
+// CONFIRMATION SCRAPE
+// =========================
 async function scrapeConfirmationPage(page) {
   await page.waitForTimeout(1500);
 
@@ -305,6 +390,9 @@ async function scrapeConfirmationPage(page) {
   }).catch((e) => ({ error: String(e) }));
 }
 
+// =========================
+// CHECKOUT & DELIVERY
+// =========================
 async function checkoutDelivery(page, params) {
   const { orderRef, deliveryDateText, deliveryAddress, submit = true, waitBefore = 5000 } = params || {};
 
@@ -373,26 +461,20 @@ async function checkoutDelivery(page, params) {
     console.log("ADIM 5: Sevk adresi seçiliyor...", deliveryAddress);
     const wanted = String(deliveryAddress).trim().toUpperCase();
 
-    // uib-dropdown toggle butonuna tıkla (dropdown'ı aç)
     const addressToggle = page.locator("button.wrap-address").first();
     await addressToggle.waitFor({ state: "attached", timeout: 30000 });
     await addressToggle.scrollIntoViewIfNeeded().catch(() => {});
     await addressToggle.click();
     await sleep(page, 1000);
 
-    // Açılan listedeki tüm adres linkleri
     const addressLinks = page.locator('a[data-cy="click-switch-addressaccount-address"]');
     const allAddresses = await addressLinks.allTextContents().catch(() => []);
     console.log("Mevcut adresler:", allAddresses);
 
-    // Tam eşleşme dene
     let hitLink = addressLinks.filter({ hasText: new RegExp(wanted, "i") }).first();
 
-    // Kısmi eşleşme: kelimeleri tek tek dene
     if ((await hitLink.count()) === 0) {
-      const words = wanted
-        .split(/[\s\-]+/)
-        .filter((w) => w.length > 3);
+      const words = wanted.split(/[\s\-]+/).filter((w) => w.length > 3);
       for (const word of words) {
         hitLink = addressLinks.filter({ hasText: new RegExp(word, "i") }).first();
         if ((await hitLink.count()) > 0) {
@@ -568,7 +650,11 @@ async function checkoutDelivery(page, params) {
   return result;
 }
 
-// ✅ LOGIN TEST
+// =========================
+// ENDPOINTS
+// =========================
+
+// ✅ LOGIN TEST (queue dışı — hızlı kontrol)
 app.post("/login-test", async (req, res) => {
   const { username, password } = req.body || {};
 
@@ -591,8 +677,8 @@ app.post("/login-test", async (req, res) => {
   }
 });
 
-// ✅ TEK ÜRÜN + (opsiyonel) checkout
-app.post("/add-to-cart", async (req, res) => {
+// ✅ TEK ÜRÜN + (opsiyonel) checkout — QUEUE'LU
+app.post("/add-to-cart", enqueue(async (req, res) => {
   const { username, password, productCode, uom, qty, checkout } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
@@ -609,6 +695,9 @@ app.post("/add-to-cart", async (req, res) => {
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
+
+    // Sepeti temizle
+    const clearResult = await withTimeout(clearCart(page), 60000, "CLEAR_CART_TIMEOUT");
 
     const itemResult = await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
 
@@ -628,6 +717,7 @@ app.post("/add-to-cart", async (req, res) => {
       ok: itemResult.ok && (!checkout || (checkoutResult && checkoutResult.ok)),
       summary,
       results,
+      clearResult,
       checkoutResult,
     });
   } catch (e) {
@@ -635,10 +725,10 @@ app.post("/add-to-cart", async (req, res) => {
   } finally {
     await browser.close();
   }
-});
+}));
 
-// ✅ ÇOKLU ÜRÜN: batch + (opsiyonel) checkout
-app.post("/add-to-cart-batch", async (req, res) => {
+// ✅ ÇOKLU ÜRÜN: batch + (opsiyonel) checkout — QUEUE'LU
+app.post("/add-to-cart-batch", enqueue(async (req, res) => {
   const { username, password, items, stopOnError = true, checkout } = req.body || {};
 
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
@@ -656,6 +746,9 @@ app.post("/add-to-cart-batch", async (req, res) => {
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
+
+    // Sepeti temizle
+    const clearResult = await withTimeout(clearCart(page), 60000, "CLEAR_CART_TIMEOUT");
 
     const results = [];
     for (const it of items) {
@@ -682,6 +775,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
       ok: (summary.failed === 0 || !stopOnError) && (!checkout || (checkoutResult && checkoutResult.ok)),
       summary,
       results,
+      clearResult,
       checkoutResult,
     });
   } catch (e) {
@@ -689,9 +783,9 @@ app.post("/add-to-cart-batch", async (req, res) => {
   } finally {
     await browser.close();
   }
-});
+}));
 
-// 🔍 DEBUG: Checkout/delivery sayfasının tam DOM yapısını döker
+// 🔍 DEBUG: Checkout/delivery sayfasının tam DOM yapısını döker (queue dışı)
 app.post("/debug-checkout-page", async (req, res) => {
   const { username, password, productCode, uom, qty, waitBefore = 10000 } = req.body || {};
 
@@ -820,6 +914,15 @@ app.post("/debug-checkout-page", async (req, res) => {
   } finally {
     await browser.close();
   }
+});
+
+// 📊 QUEUE DURUMU
+app.get("/queue-status", (req, res) => {
+  res.json({
+    isProcessing,
+    queueLength: queue.length,
+    totalPending: queue.length + (isProcessing ? 1 : 0),
+  });
 });
 
 const PORT = process.env.PORT || 3000;
