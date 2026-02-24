@@ -13,7 +13,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT_STEP_MS = 10000; // min 10 sn (senin kuralın)
+const WAIT_STEP_MS = 10000;
 const BASE_URL = "https://www.mybidfood.com.tr";
 
 async function sleep(page, ms) {
@@ -50,12 +50,6 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
-/**
- * Ürün search sayfasında ilgili productCode satırını bulur,
- * uom satırını seçer (ADET/KOLİ),
- * önce Ekle ile qty alanını açar,
- * sonra +/- ile hedef qty'ye gelince DURUR.
- */
 async function addOneItem(page, item) {
   const { productCode, uom, qty } = item || {};
   const requestedQty = Number(qty ?? 1);
@@ -67,7 +61,6 @@ async function addOneItem(page, item) {
     return { ok: false, status: 400, productCode, showUom: uom, error: "qty >= 1 olmalı" };
   }
 
-  // Mevcut URL'den kullanıcıya özgü base path'i al (örn: /u/13185)
   const currentPageUrl = page.url();
   const userPathMatch2 = currentPageUrl.match(/mybidfood\.com\.tr(\/u\/[^/#]+)/);
   const userBasePath2 = userPathMatch2 ? userPathMatch2[1] : '';
@@ -77,7 +70,6 @@ async function addOneItem(page, item) {
 
   await page.goto(productUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, 2000);
-  // SPA bazen geç çiziyor
   await sleep(page, WAIT_STEP_MS);
 
   const row = page.locator(`#product-list-${productCode}`).first();
@@ -85,14 +77,12 @@ async function addOneItem(page, item) {
     return { ok: false, status: 404, productCode, uom, error: `Ürün bloğu yok: ${productCode}`, productUrl };
   }
 
-  // UOM satırını (tr) net yakala: row içinde .UOM .type == uom
   const uomUpper = String(uom).trim().toUpperCase();
   const uomType = row.locator(".UOM .type").filter({
     hasText: uomUpper,
   }).first();
 
   if ((await uomType.count()) === 0) {
-    // mevcut UOM listesi dönelim
     const availableUoms = await row.locator(".UOM .type").allTextContents().catch(() => []);
     return {
       ok: false,
@@ -105,7 +95,6 @@ async function addOneItem(page, item) {
     };
   }
 
-  // uomType'ın bulunduğu tr
   const scope = uomType.locator("xpath=ancestor::tr[1]").first();
 
   const addBtn = scope.locator('button[data-cy="click-set-add-stateprice"]').first();
@@ -113,7 +102,6 @@ async function addOneItem(page, item) {
   const minusBtn = scope.locator('button[data-cy="click-decrease-qtyprice"]').first();
   const qtyInput = scope.locator('input[data-cy="click-input-qty"]').first();
 
-  // Önce "Ekle" ile qty alanını aç
   if ((await addBtn.count()) > 0) {
     await addBtn.scrollIntoViewIfNeeded().catch(() => {});
     await addBtn.click({ force: true }).catch(() => {});
@@ -121,7 +109,6 @@ async function addOneItem(page, item) {
     await sleep(page, WAIT_STEP_MS);
   }
 
-  // qty input attached olsun
   await qtyInput.waitFor({ state: "attached", timeout: 60000 }).catch(() => {});
 
   const readQty = async () => {
@@ -130,7 +117,6 @@ async function addOneItem(page, item) {
     return Number.isFinite(n) ? n : null;
   };
 
-  // Güvenli başlangıç: 1'e indir
   let safety = 40;
   while (safety-- > 0) {
     const cur = await readQty();
@@ -140,7 +126,6 @@ async function addOneItem(page, item) {
     await sleep(page, WAIT_STEP_MS);
   }
 
-  // hedefe çık: hedefe gelince DUR
   let guard = 80;
   while (guard-- > 0) {
     const cur = await readQty();
@@ -159,7 +144,6 @@ async function addOneItem(page, item) {
       continue;
     }
 
-    // cur > requestedQty ise azalt
     if ((await minusBtn.count()) === 0) {
       return { ok: false, status: 500, productCode, uom: uomUpper, error: "Minus yok", productUrl };
     }
@@ -193,17 +177,12 @@ async function addOneItem(page, item) {
   };
 }
 
-/**
- * Confirmation sayfasından sipariş bilgilerini (müşteri kodu, sevk adresi, ürünler, fiyatlar, summary) çeker
- * Bu sürüm confirmation DOM’una özel daha deterministiktir.
- */
 async function scrapeConfirmationPage(page) {
   await page.waitForTimeout(1500);
 
   return await page.evaluate(() => {
     const text = (el) => (el?.textContent ?? "").replace(/\s+/g, " ").trim();
 
-    // Üst “Sipariş Detayları”
     const orderInfo = {};
     document.querySelectorAll(".header-block .checkout-field-row").forEach((row) => {
       const label = text(row.querySelector(".col-xs-3"))?.replace(":", "");
@@ -215,7 +194,6 @@ async function scrapeConfirmationPage(page) {
     document
       .querySelectorAll('.account-wrap[ng-repeat="account in accounts"]')
       .forEach((accountEl) => {
-        // Başlık: "AKD-ANA DEPO - ACN01783"
         const title = text(accountEl.querySelector("h3.title"));
         let accountTitle = "";
         let accountCodeFromTitle = "";
@@ -227,7 +205,6 @@ async function scrapeConfirmationPage(page) {
           accountTitle = title;
         }
 
-        // Hesap header alanı (Hesap adı / Hesap Kodu / Sevk Adresi / referanslar)
         const header = accountEl.querySelector(".account-header");
         const accountDetails = {};
         if (header) {
@@ -237,18 +214,16 @@ async function scrapeConfirmationPage(page) {
             if (!label || !valueCol) return;
 
             if (label.toLowerCase().includes("sevk adresi")) {
-              // Adres çok satırlı: div.ng-binding’leri topla
               const lines = Array.from(valueCol.querySelectorAll(".ng-binding"))
                 .map(text)
                 .filter(Boolean);
-              accountDetails[label] = lines; // array
+              accountDetails[label] = lines;
             } else {
               accountDetails[label] = text(valueCol);
             }
           });
         }
 
-        // account.Orders (referenceGroup)
         const orders = [];
         accountEl
           .querySelectorAll('[ng-repeat="referenceGroup in account.Orders"]')
@@ -262,11 +237,9 @@ async function scrapeConfirmationPage(page) {
                 const tds = itemEl.querySelectorAll("td");
                 if (tds.length < 3) return;
 
-                // Açıklama hücresi
                 const productCell = itemEl.querySelector("td.product") || tds[0];
                 const productText = text(productCell);
 
-                // Örn: "Biscoff Lotus Spread Creamy (LOTUS) [MAD15667]"
                 const codeMatch = productText.match(/\[([A-Z0-9]+)\]/i);
                 const productCode = codeMatch ? codeMatch[1].trim() : "";
 
@@ -282,17 +255,14 @@ async function scrapeConfirmationPage(page) {
                     .trim();
                 }
 
-                // Boyut / UOM
                 const sizeUnitCell = tds[1];
                 const size = text(sizeUnitCell.querySelector('[ng-if="item.Product.PackSize"]')) || "";
                 const uom = text(sizeUnitCell.querySelector('[ng-if="item.UOMDesc"]')) || "";
 
-                // Miktar: 3. kolon
                 const qty = text(tds[2].querySelector(".ng-binding")) || text(tds[2]) || "";
 
-                // Fiyat kolonları: qty’den sonraki td.text-right’lar
                 const rightTds = Array.from(itemEl.querySelectorAll("td.text-right"));
-                const priceTds = rightTds.slice(1); // [Fiyat, AraToplam, KDV, Toplam] (varsa)
+                const priceTds = rightTds.slice(1);
 
                 const unitPrice = text(priceTds[0]) || "";
                 const subTotal = text(priceTds[1]) || "";
@@ -324,7 +294,6 @@ async function scrapeConfirmationPage(page) {
         });
       });
 
-    // Sağ alt “checkout-summary”
     const summary = {};
     document.querySelectorAll(".checkout-summary .checkout-field-row").forEach((row) => {
       const label = text(row.querySelector(".col-xs-6:first-child"));
@@ -336,32 +305,30 @@ async function scrapeConfirmationPage(page) {
   }).catch((e) => ({ error: String(e) }));
 }
 
-/**
- * Tam akış: Sepet ikonu → Siparişi Tamamla → Sipariş Detayları (ref yaz, Devam) →
- * Sipariş Sevk Detayları (tarih seç, Gönder) → Confirmation
- */
 async function checkoutDelivery(page, params) {
-  const { orderRef, deliveryDateText, submit = true, waitBefore = 5000 } = params || {};
+  const { orderRef, deliveryDateText, deliveryAddress, submit = true, waitBefore = 5000 } = params || {};
 
   const result = {
     ok: true,
     orderRef: orderRef ?? null,
     deliveryDateText: deliveryDateText ?? null,
+    deliveryAddress: deliveryAddress ?? null,
     submit: !!submit,
     orderRefSet: false,
+    deliveryAddressSelected: false,
     deliveryDateSelected: false,
     submitted: false,
     confirmationUrl: null,
   };
 
-  // ADIM 1: Sepet ikonuna tıkla - yan panel açılır
+  // ADIM 1: Sepet ikonuna tıkla
   console.log("ADIM 1: Sepet ikonuna tıklanıyor...");
   const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
   await cartIcon.waitFor({ state: "attached", timeout: 30000 });
   await cartIcon.click();
   await sleep(page, 2000);
 
-  // ADIM 2: "Siparişi Tamamla" butonuna tıkla
+  // ADIM 2: Siparişi Tamamla
   console.log("ADIM 2: Siparişi Tamamla tıklanıyor...");
   const checkoutBtn = page.locator('[data-cy="click-checkout-landing"]').first();
   await checkoutBtn.waitFor({ state: "attached", timeout: 30000 });
@@ -369,7 +336,7 @@ async function checkoutDelivery(page, params) {
   await sleep(page, waitBefore);
   console.log("Sipariş Detayları sayfası:", page.url());
 
-  // ADIM 3: Sipariş Detayları sayfası - orderRef yaz
+  // ADIM 3: OrderRef yaz
   if (orderRef && String(orderRef).trim().length > 0) {
     console.log("ADIM 3: OrderRef yazılıyor...", orderRef);
     const refInput = page.locator('[data-cy="headerOrderRef"]').first();
@@ -377,11 +344,8 @@ async function checkoutDelivery(page, params) {
     await refInput.scrollIntoViewIfNeeded().catch(() => {});
     await refInput.click();
     await sleep(page, 200);
-
     await refInput.selectText().catch(() => {});
     await refInput.fill(String(orderRef));
-
-    // Angular ng-model tetikle
     await refInput.evaluate((el) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -391,12 +355,11 @@ async function checkoutDelivery(page, params) {
         if (s) s.$apply();
       } catch (e) {}
     });
-
     await sleep(page, 500);
     result.orderRefSet = true;
   }
 
-  // ADIM 4: "Devam" butonuna tıkla
+  // ADIM 4: Devam butonu
   console.log("ADIM 4: Devam butonuna tıklanıyor...");
   const continueBtn = page.locator('[data-cy="continue-button"]').first();
   await continueBtn.waitFor({ state: "attached", timeout: 30000 });
@@ -405,9 +368,63 @@ async function checkoutDelivery(page, params) {
   await sleep(page, waitBefore);
   console.log("Sevk Detayları sayfası:", page.url());
 
-  // ADIM 5: Tarih seç
+  // ADIM 5: Sevk Adresi Seç
+  if (deliveryAddress && String(deliveryAddress).trim().length > 0) {
+    console.log("ADIM 5: Sevk adresi seçiliyor...", deliveryAddress);
+    const wanted = String(deliveryAddress).trim().toUpperCase();
+
+    // uib-dropdown toggle butonuna tıkla (dropdown'ı aç)
+    const addressToggle = page.locator("button.wrap-address").first();
+    await addressToggle.waitFor({ state: "attached", timeout: 30000 });
+    await addressToggle.scrollIntoViewIfNeeded().catch(() => {});
+    await addressToggle.click();
+    await sleep(page, 1000);
+
+    // Açılan listedeki tüm adres linkleri
+    const addressLinks = page.locator('a[data-cy="click-switch-addressaccount-address"]');
+    const allAddresses = await addressLinks.allTextContents().catch(() => []);
+    console.log("Mevcut adresler:", allAddresses);
+
+    // Tam eşleşme dene
+    let hitLink = addressLinks.filter({ hasText: new RegExp(wanted, "i") }).first();
+
+    // Kısmi eşleşme: kelimeleri tek tek dene
+    if ((await hitLink.count()) === 0) {
+      const words = wanted
+        .split(/[\s\-]+/)
+        .filter((w) => w.length > 3);
+      for (const word of words) {
+        hitLink = addressLinks.filter({ hasText: new RegExp(word, "i") }).first();
+        if ((await hitLink.count()) > 0) {
+          console.log(`Kısmi eşleşme bulundu: "${word}"`);
+          break;
+        }
+      }
+    }
+
+    if ((await hitLink.count()) === 0) {
+      return {
+        ok: false,
+        status: 404,
+        error: `Adres bulunamadı: ${wanted}`,
+        availableAddresses: allAddresses.map((x) => (x || "").trim()).filter(Boolean),
+        ...result,
+      };
+    }
+
+    const selectedText = await hitLink.textContent().catch(() => "");
+    await hitLink.scrollIntoViewIfNeeded().catch(() => {});
+    await hitLink.click();
+    await sleep(page, 2000);
+
+    result.deliveryAddressSelected = true;
+    result.selectedAddress = selectedText.trim();
+    console.log("✅ Adres seçildi:", result.selectedAddress);
+  }
+
+  // ADIM 6: Tarih seç
   if (deliveryDateText && String(deliveryDateText).trim().length > 0) {
-    console.log("ADIM 5: Tarih seçiliyor...", deliveryDateText);
+    console.log("ADIM 6: Tarih seçiliyor...", deliveryDateText);
     const wanted = String(deliveryDateText).trim();
 
     const dropdownBtn = page.locator('[data-cy="delivery-date-dropdown"]').first();
@@ -416,11 +433,10 @@ async function checkoutDelivery(page, params) {
     await dropdownBtn.click();
     await sleep(page, 1000);
 
-    const menu = page.locator("ul[data-cy=\"delivery-date-menu\"]").first();
+    const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
     await menu.waitFor({ state: "attached", timeout: 30000 });
     const allOptions = await menu.locator("li").allTextContents().catch(() => []);
 
-    // recording'deki data-cy ile önce dene, sonra text ile
     let hitLi = menu
       .locator('[data-cy="click-set-dateparentindex-account-date"]')
       .filter({ hasText: wanted })
@@ -455,14 +471,13 @@ async function checkoutDelivery(page, params) {
     console.log("Tarih seçildi:", result.selectedDateText);
   }
 
-  // ADIM 6: Gönder butonuna tıkla
+  // ADIM 7: Gönder
   if (submit) {
-    console.log("ADIM 6: Gönder butonuna tıklanıyor...");
+    console.log("ADIM 7: Gönder butonuna tıklanıyor...");
     const submitBtn = page.locator('[data-cy="click-submit-orderaccount-submit"]').first();
     await submitBtn.waitFor({ state: "attached", timeout: 60000 });
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
 
-    // Buton disabled ise bekle (max 15 sn)
     for (let i = 0; i < 15; i++) {
       const isDisabled = await submitBtn.isDisabled().catch(() => true);
       if (!isDisabled) break;
@@ -470,14 +485,12 @@ async function checkoutDelivery(page, params) {
       await sleep(page, 1000);
     }
 
-    // Submit öncesi screenshot
     const screenshotBase64 = await page
       .screenshot({ fullPage: false })
       .then((buf) => buf.toString("base64"))
       .catch(() => null);
     result.screenshotBase64 = screenshotBase64;
 
-    // Submit öncesi state
     const preSubmitState = await page
       .evaluate(() => {
         try {
@@ -507,7 +520,6 @@ async function checkoutDelivery(page, params) {
     console.log("✅ Gönder butonuna tıklandı");
     await sleep(page, 3000);
 
-    // Confirmation bekle (max 90 sn)
     let confirmationReached = false;
     for (let i = 0; i < 30; i++) {
       const currentUrl = page.url();
@@ -523,14 +535,12 @@ async function checkoutDelivery(page, params) {
       result.submitted = true;
       result.confirmationUrl = page.url();
 
-      // DOM hazır olma kontrolü
       await page.waitForSelector(".checkout-block", { timeout: 60000 }).catch(() => {});
       await page
         .waitForSelector('.account-wrap[ng-repeat="account in accounts"]', { timeout: 60000 })
         .catch(() => {});
 
-      // ADIM 7: Confirmation sayfasından verileri çek
-      console.log("ADIM 7: Confirmation sayfasından veriler çekiliyor...");
+      console.log("ADIM 8: Confirmation sayfasından veriler çekiliyor...");
       const confirmationData = await scrapeConfirmationPage(page);
       result.confirmationData = confirmationData;
       console.log("Confirmation verisi alındı:", JSON.stringify(confirmationData).slice(0, 200));
@@ -558,7 +568,7 @@ async function checkoutDelivery(page, params) {
   return result;
 }
 
-// ✅ SADECE LOGIN TEST
+// ✅ LOGIN TEST
 app.post("/login-test", async (req, res) => {
   const { username, password } = req.body || {};
 
@@ -582,7 +592,6 @@ app.post("/login-test", async (req, res) => {
 });
 
 // ✅ TEK ÜRÜN + (opsiyonel) checkout
-// NOT: Response batch formatıyla aynı olacak: { ok, summary, results[], checkoutResult }
 app.post("/add-to-cart", async (req, res) => {
   const { username, password, productCode, uom, qty, checkout } = req.body || {};
 
@@ -655,7 +664,6 @@ app.post("/add-to-cart-batch", async (req, res) => {
 
       if (!r.ok && stopOnError) break;
 
-      // ürünler arası kısa nefes (SPA stabilize)
       await sleep(page, 1500);
     }
 
@@ -699,24 +707,19 @@ app.post("/debug-checkout-page", async (req, res) => {
   page.setDefaultNavigationTimeout(60000);
 
   try {
-    // Login
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
 
-    // Ürün ekle (sepet dolu olsun ki checkout sayfası gerçek halini göstersin)
     if (productCode) {
       await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
     }
 
-    // Delivery sayfasına git
     const deliveryUrl = `${BASE_URL}/#/checkout/delivery`;
     await page.goto(deliveryUrl, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(waitBefore);
 
-    // Tam HTML
     const fullHtml = await page.content();
 
-    // Submit butonunun durumu
     const submitBtnState = await page
       .evaluate(() => {
         const btn = document.querySelector('[data-cy="click-submit-orderaccount-submit"]');
@@ -732,7 +735,6 @@ app.post("/debug-checkout-page", async (req, res) => {
       })
       .catch((e) => ({ error: String(e) }));
 
-    // Tüm input/select elementleri ve değerleri
     const inputs = await page
       .evaluate(() => {
         return Array.from(document.querySelectorAll("input, select, textarea")).map((el) => ({
@@ -749,10 +751,8 @@ app.post("/debug-checkout-page", async (req, res) => {
       })
       .catch((e) => ({ error: String(e) }));
 
-    // Hata mesajları varsa
     const errorMessages = await page.locator("text=/hata|error|uyarı|warning/i").allTextContents().catch(() => []);
 
-    // Angular scope - submit'i etkileyen kritik değerler
     const angularScope = await page
       .evaluate(() => {
         try {
@@ -760,7 +760,6 @@ app.post("/debug-checkout-page", async (req, res) => {
           if (!btn) return { error: "btn not found" };
 
           let scope = angular.element(btn).scope();
-
           let targetScope = scope;
           let depth = 0;
           while (targetScope && depth < 15) {
