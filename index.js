@@ -20,6 +20,21 @@ async function sleep(page, ms) {
   await page.waitForTimeout(ms);
 }
 
+async function setQtyByTyping(qtyInput, requestedQty) {
+  await qtyInput.scrollIntoViewIfNeeded().catch(() => {});
+  await qtyInput.click({ force: true }).catch(() => {});
+  await qtyInput.fill(String(requestedQty)).catch(() => {});
+  await qtyInput.evaluate((el) => {
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new Event("blur", { bubbles: true }));
+    try {
+      const s = window.angular?.element(el)?.scope?.();
+      if (s) s.$apply?.();
+    } catch (e) {}
+  }).catch(() => {});
+}
+
 async function login(page, username, password) {
   await page.goto(`${BASE_URL}/`, { waitUntil: "domcontentloaded" });
 
@@ -157,11 +172,31 @@ async function addOneItem(page, item) {
 
   await qtyInput.waitFor({ state: "attached", timeout: 60000 }).catch(() => {});
 
+  
   const readQty = async () => {
     const v = await qtyInput.inputValue().catch(() => "");
     const n = parseInt(String(v || "0"), 10);
     return Number.isFinite(n) ? n : null;
   };
+
+    // ✅ HIZLI YÖNTEM: Qty'yi input'a yazarak set et
+  await setQtyByTyping(qtyInput, requestedQty);
+  await sleep(page, 2500); // 1sn bekle (10sn değil)
+
+  let finalQtyFast = await readQty();
+  if (finalQtyFast === requestedQty) {
+    return {
+      ok: true,
+      productCode,
+      uom: uomUpper,
+      requestedQty,
+      finalQty: finalQtyFast,
+      productUrl,
+      note: "Akış: login -> search -> UOM satırı -> Ekle -> qty input'a yazıldı (blur/input/change) -> tamam.",
+    };
+  }
+  // ❗ Eğer tutmadıysa aşağıdaki mevcut +/- döngülerine düşecek (fallback)
+
 
   let safety = 40;
   while (safety-- > 0) {
