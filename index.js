@@ -50,6 +50,52 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
+
+//sepeti temizleme
+
+
+async function clearCartAfterLogin(page, { timeoutMs = 15000 } = {}) {
+  const log = (...a) => console.log("[CLEAR_CART]", ...a);
+
+  // Sepet ikonuna tıkla (offcanvas aç)
+  const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
+  await cartIcon.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
+  await cartIcon.click().catch(() => {});
+  await sleep(page, 1200);
+
+  // "Sepeti Sil" butonu varsa tıkla, yoksa sepet zaten boş olabilir
+  const clearBtn = page.locator('[data-cy="click-clear-cart"], a[ng-click="clearCart()"]').first();
+  const hasClear = (await clearBtn.count().catch(() => 0)) > 0;
+  if (!hasClear) {
+    log("Sepeti Sil butonu yok (sepet boş olabilir). Devam.");
+    return { ok: true, cleared: false, reason: "clear_button_not_found" };
+  }
+
+  await clearBtn.click().catch(() => {});
+  await sleep(page, 800);
+
+  // Modal "Tamam" (OK)
+  const okBtn = page.locator('[data-cy="modal-ok"], button[ng-click^="ok("]').first();
+  const hasOk = await okBtn
+    .waitFor({ state: "attached", timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!hasOk) {
+    log("Modal OK butonu gelmedi. Devam ediyorum (UI farklı olabilir).");
+    return { ok: true, cleared: false, reason: "modal_ok_not_found" };
+  }
+
+  await okBtn.click().catch(() => {});
+  await sleep(page, 1200);
+
+  log("Sepet temizleme denendi.");
+  return { ok: true, cleared: true };
+}
+
+////// sepeti temizleme */
+
+
 async function addOneItem(page, item) {
   const { productCode, uom, qty } = item || {};
   const requestedQty = Number(qty ?? 1);
@@ -610,6 +656,7 @@ app.post("/add-to-cart", async (req, res) => {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
 
+    await withTimeout(clearCartAfterLogin(page), 60000, "CLEAR_CART_TIMEOUT"); // sepet temizleme
     const itemResult = await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
 
     let checkoutResult = null;
@@ -656,6 +703,8 @@ app.post("/add-to-cart-batch", async (req, res) => {
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
+
+    await withTimeout(clearCartAfterLogin(page), 60000, "CLEAR_CART_TIMEOUT"); // sepet temizleme
 
     const results = [];
     for (const it of items) {
