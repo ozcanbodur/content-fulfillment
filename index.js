@@ -531,13 +531,27 @@ async function checkoutDelivery(page, params) {
     }
 
     if ((await hitLi.count()) === 0) {
-      return {
-        ok: false,
-        status: 404,
-        error: `Tarih bulunamadı: ${wanted}`,
-        availableDates: allOptions.map((x) => (x || "").trim()).filter(Boolean),
-        ...result,
-      };
+      // Tarih bulunamadı → availableDates'in ilk geçerli tarihini otomatik seç
+      const cleanOptions = allOptions.map((x) => (x || "").trim()).filter(Boolean);
+      console.log(`Tarih bulunamadı: "${wanted}" — Otomatik ilk tarih deneniyor:`, cleanOptions[0]);
+
+      if (cleanOptions.length > 0) {
+        // İlk tarihi dene
+        hitLi = menu.locator("li").filter({ hasText: cleanOptions[0] }).first();
+        result.autoDateFallback = true;
+        result.autoDateRequested = wanted;
+        result.autoDateSelected = cleanOptions[0];
+      }
+
+      if ((await hitLi.count()) === 0) {
+        return {
+          ok: false,
+          status: 404,
+          error: `Tarih bulunamadı: ${wanted}`,
+          availableDates: cleanOptions,
+          ...result,
+        };
+      }
     }
 
     const anchor = hitLi.locator("a").first();
