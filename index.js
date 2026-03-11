@@ -417,6 +417,33 @@ async function checkoutDelivery(page, params) {
   await sleep(page, waitBefore);
   console.log("Sipariş Detayları sayfası:", page.url());
 
+  // ADIM 2.5: Sipariş Durumu Kontrolü (backOrder uyarı sayfası)
+  console.log("ADIM 2.5: Sipariş Durumu Kontrolü kontrol ediliyor...");
+  const validationBtn = page.locator('[data-cy="checkout-validation-continue-btn"]').first();
+  const hasValidation = await validationBtn
+    .waitFor({ state: "attached", timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (hasValidation) {
+    const isDisabled = await validationBtn.isDisabled().catch(() => true);
+    console.log("⚠️ Sipariş Durumu Kontrolü sayfası geldi! Disabled:", isDisabled);
+    if (!isDisabled) {
+      await validationBtn.click();
+      await sleep(page, 3000);
+      console.log("✅ Uyarı geçildi. URL:", page.url());
+    } else {
+      return {
+        ok: false,
+        status: 409,
+        error: "Sipariş Durumu Kontrolü: outOfStock veya unavailable ürün var, devam edilemiyor",
+        ...result,
+      };
+    }
+  } else {
+    console.log("ℹ️ Sipariş Durumu Kontrolü sayfası gelmedi, devam ediliyor.");
+  }
+
   // ADIM 3: OrderRef yaz
   if (orderRef && String(orderRef).trim().length > 0) {
     console.log("ADIM 3: OrderRef yazılıyor...", orderRef);
