@@ -417,33 +417,6 @@ async function checkoutDelivery(page, params) {
   await sleep(page, waitBefore);
   console.log("Sipariş Detayları sayfası:", page.url());
 
-  // ADIM 2.5: Sipariş Durumu Kontrolü (backOrder uyarı sayfası)
-  console.log("ADIM 2.5: Sipariş Durumu Kontrolü kontrol ediliyor...");
-  const validationBtn = page.locator('[data-cy="checkout-validation-continue-btn"]').first();
-  const hasValidation = await validationBtn
-    .waitFor({ state: "attached", timeout: 5000 })
-    .then(() => true)
-    .catch(() => false);
-
-  if (hasValidation) {
-    const isDisabled = await validationBtn.isDisabled().catch(() => true);
-    console.log("⚠️ Sipariş Durumu Kontrolü sayfası geldi! Disabled:", isDisabled);
-    if (!isDisabled) {
-      await validationBtn.click();
-      await sleep(page, 3000);
-      console.log("✅ Uyarı geçildi. URL:", page.url());
-    } else {
-      return {
-        ok: false,
-        status: 409,
-        error: "Sipariş Durumu Kontrolü: outOfStock veya unavailable ürün var, devam edilemiyor",
-        ...result,
-      };
-    }
-  } else {
-    console.log("ℹ️ Sipariş Durumu Kontrolü sayfası gelmedi, devam ediliyor.");
-  }
-
   // ADIM 3: OrderRef yaz
   if (orderRef && String(orderRef).trim().length > 0) {
     console.log("ADIM 3: OrderRef yazılıyor...", orderRef);
@@ -544,37 +517,92 @@ async function checkoutDelivery(page, params) {
     const menu = page.locator('ul[data-cy="delivery-date-menu"]').first();
     await menu.waitFor({ state: "attached", timeout: 30000 });
     const allOptions = await menu.locator("li").allTextContents().catch(() => []);
+    const cleanOptions = allOptions.map((x) => (x || "").trim()).filter(Boolean);
 
-    let hitLi = menu
-      .locator('[data-cy="click-set-dateparentindex-account-date"]')
-      .filter({ hasText: wanted })
-      .first();
+    // Menüde tarih arama yardımcı fonksiyonu
+    const findInMenu = async (searchText) => {
+      let li = menu
+        .locator('[data-cy="click-set-dateparentindex-account-date"]')
+        .filter({ hasText: searchText })
+        .first();
+      if ((await li.count()) > 0) return li;
 
-    if ((await hitLi.count()) === 0) hitLi = menu.locator("li").filter({ hasText: wanted }).first();
+      li = menu.locator("li").filter({ hasText: searchText }).first();
+      if ((await li.count()) > 0) return li;
 
-    if ((await hitLi.count()) === 0) {
-      const dayMatch = wanted.match(/(\d+)/);
-      if (dayMatch) hitLi = menu.locator("li").filter({ hasText: dayMatch[1] }).first();
+      const dayMatch = searchText.match(/(\d+)/);
+      if (dayMatch) {
+        li = menu.locator("li").filter({ hasText: dayMatch[1] }).first();
+        if ((await li.count()) > 0) return li;
+      }
+
+      return null;
+    };
+
+    // Türkçe ay isimleri
+    const turkishMonths = {
+      "Ocak": 0, "Subat": 1, "\u015eubat": 1, "Mart": 2, "Nisan": 3,
+      "Mayis": 4, "May\u0131s": 4, "Haziran": 5, "Temmuz": 6,
+      "Agustos": 7, "A\u011fustos": 7, "Eylul": 8, "Eyl\u00fcl": 8,
+      "Ekim": 9, "Kasim": 10, "Kas\u0131m": 10, "Aralik": 11, "Aral\u0131k": 11
+    };
+    const monthNames = ["Ocak","\u015eubat","Mart","Nisan","May\u0131s","Haziran","Temmuz","A\u011fustos","Eyl\u00fcl","Ekim","Kas\u0131m","Aral\u0131k"];
+
+    // Tarihi parse et
+    const parseDate = (text) => {
+      const trMatch = text.match(/(\d+)\s+(Ocak|\u015eubat|Subat|Mart|Nisan|May\u0131s|Mayis|Haziran|Temmuz|A\u011fustos|Agustos|Eyl\u00fcl|Eylul|Ekim|Kas\u0131m|Kasim|Aral\u0131k|Aralik)/i);
+      if (trMatch) {
+        const day = parseInt(trMatch[1]);
+        const month = turkishMonths[trMatch[2]];
+        const year = new Date().getFullYear();
+        return new Date(year, month, day);
+      }
+      const dotMatch = text.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+      if (dotMatch) {
+        return new Date(parseInt(dotMatch[3]), parseInt(dotMatch[2]) - 1, parseInt(dotMatch[1]));
+      }
+      const isoMatch = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+      if (isoMatch) {
+        return new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+      }
+      return null;
+    };
+
+    // 1. İstenen tarihi dene
+    let hitLi = await findInMenu(wanted);
+
+    // 2. Bulunamadıysa → ertesi günü dene
+    if (!hitLi) {
+      console.log(`Tarih bulunamad\u0131: "${wanted}" \u2014 Ertesi g\u00fcn deneniyor...`);
+      const parsedDate = parseDate(wanted);
+      if (parsedDate) {
+        parsedDate.setDate(parsedDate.getDate() + 1);
+        const nextDateText = `${parsedDate.getDate()} ${monthNames[parsedDate.getMonth()]}`;
+        console.log(`Ertesi g\u00fcn aran\u0131yor: "${nextDateText}"`);
+        hitLi = await findInMenu(nextDateText);
+        if (hitLi) {
+          result.autoDateFallback = true;
+          result.autoDateRequested = wanted;
+          result.autoDateNextDay = nextDateText;
+          console.log(`\u2705 Ertesi g\u00fcn bulundu: "${nextDateText}"`);
+        }
+      }
     }
 
-    if ((await hitLi.count()) === 0) {
-      // Tarih bulunamadı → availableDates'in ilk geçerli tarihini otomatik seç
-      const cleanOptions = allOptions.map((x) => (x || "").trim()).filter(Boolean);
-      console.log(`Tarih bulunamadı: "${wanted}" — Otomatik ilk tarih deneniyor:`, cleanOptions[0]);
-
+    // 3. Hâlâ bulunamadıysa → ilk mevcut tarihe düş
+    if (!hitLi) {
+      console.log(`Ertesi g\u00fcn de bulunamad\u0131 \u2014 Otomatik ilk tarih deneniyor:`, cleanOptions[0]);
       if (cleanOptions.length > 0) {
-        // İlk tarihi dene
         hitLi = menu.locator("li").filter({ hasText: cleanOptions[0] }).first();
         result.autoDateFallback = true;
         result.autoDateRequested = wanted;
         result.autoDateSelected = cleanOptions[0];
       }
-
-      if ((await hitLi.count()) === 0) {
+      if (!hitLi || (await hitLi.count()) === 0) {
         return {
           ok: false,
           status: 404,
-          error: `Tarih bulunamadı: ${wanted}`,
+          error: `Tarih bulunamad\u0131: ${wanted}`,
           availableDates: cleanOptions,
           ...result,
         };
