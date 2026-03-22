@@ -191,7 +191,7 @@ async function login(page, username, password) {
   return { hasLoginForm, passStillVisible, hasLogout, hasError, currentUrl, loggedIn };
 }
 
-async function clearCartAfterLogin(page, { timeoutMs = 15000, username = "?" } = {}) {
+async function clearCartAfterLogin(page, { timeoutMs = 30000, username = "?" } = {}) {
   const log = (...a) => console.log(`[CLEAR_CART][${username}]`, ...a);
   log("Başlıyor...");
   const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
