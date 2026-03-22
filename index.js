@@ -196,7 +196,7 @@ async function clearCartAfterLogin(page, { timeoutMs = 15000 } = {}) {
   const cartIcon = page.locator('[data-cy="top-menu_click-check-out-state"]').first();
   await cartIcon.waitFor({ state: "attached", timeout: 30000 }).catch(() => {});
   await cartIcon.click().catch(() => {});
-  await sleep(page, 1200);
+  await sleep(page, 3000);
   const clearBtn = page.locator('[data-cy="click-clear-cart"], a[ng-click="clearCart()"]').first();
   const hasClear = (await clearBtn.count().catch(() => 0)) > 0;
   if (!hasClear) {
