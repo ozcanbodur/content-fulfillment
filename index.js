@@ -1,5 +1,5 @@
 const express = require("express");
-const { chromium } = require("playwright");
+const { chromium, firefox } = require("playwright");
 const cors = require('cors');
 
 const app = express();
@@ -14,12 +14,12 @@ app.get("/", (req, res) => res.send("OK"));
 // =========================
 const USER_POOLS = {
   AVRUPA: [
-    { username: process.env.AVRUPA1_USERNAME, password: process.env.AVRUPA1_PASSWORD },
-    { username: process.env.AVRUPA2_USERNAME, password: process.env.AVRUPA2_PASSWORD },
+    { username: process.env.AVRUPA1_USERNAME, password: process.env.AVRUPA1_PASSWORD, browser: "chromium" },
+    { username: process.env.AVRUPA2_USERNAME, password: process.env.AVRUPA2_PASSWORD, browser: "firefox" },
   ],
   ASYA: [
-    { username: process.env.ASYA1_USERNAME, password: process.env.ASYA1_PASSWORD },
-    { username: process.env.ASYA2_USERNAME, password: process.env.ASYA2_PASSWORD },
+    { username: process.env.ASYA1_USERNAME, password: process.env.ASYA1_PASSWORD, browser: "chromium" },
+    { username: process.env.ASYA2_USERNAME, password: process.env.ASYA2_PASSWORD, browser: "firefox" },
   ],
 };
 
@@ -604,8 +604,11 @@ async function checkoutDelivery(page, params) {
 // =========================
 // CORE BATCH LOGIC
 // =========================
-async function runBatch({ username, password, items, stopOnError, checkout }) {
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
+async function runBatch({ username, password, items, stopOnError, checkout, browserType = "chromium" }) {
+  const launcher = browserType === "firefox" ? firefox : chromium;
+  const launchArgs = browserType === "firefox" ? [] : ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"];
+  console.log(`[BROWSER] ${username} → ${browserType}`);
+  const browser = await launcher.launch({ headless: true, args: launchArgs });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
@@ -699,7 +702,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
 
   try {
     const result = await withTimeout(
-      runBatch({ username, password, items, stopOnError, checkout }),
+      runBatch({ username, password, items, stopOnError, checkout, browserType: acquiredUser?.browser || "chromium" }),
       900000, // 15 dakika (önceki: 5 dk — yetersizdi)
       "BATCH_TIMEOUT"
     );
