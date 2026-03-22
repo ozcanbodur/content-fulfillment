@@ -216,8 +216,11 @@ async function clearCartAfterLogin(page, { timeoutMs = 30000, username = "?" } =
   const hasOk = await okBtn.waitFor({ state: "visible", timeout: timeoutMs }).then(() => true).catch(() => false);
   log(`Modal OK butonu bulundu: ${hasOk}`);
   if (!hasOk) {
-    log("Modal OK butonu gelmedi.");
-    return { ok: true, cleared: false, reason: "modal_ok_not_found" };
+    const screenshotBase64 = await page.screenshot({ fullPage: false }).then((b) => b.toString("base64")).catch(() => null);
+    const currentUrl = page.url();
+    const pageTitle = await page.title().catch(() => "");
+    log(`Modal OK butonu gelmedi. URL: ${currentUrl} | Title: ${pageTitle}`);
+    return { ok: true, cleared: false, reason: "modal_ok_not_found", screenshotBase64, currentUrl, pageTitle };
   }
   await okBtn.click().catch(() => {});
   await sleep(page, 1200);
