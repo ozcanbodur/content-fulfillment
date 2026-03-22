@@ -211,7 +211,7 @@ async function clearCartAfterLogin(page, { timeoutMs = 30000, username = "?" } =
   }
   await clearBtn.click().catch(() => {});
   log("Sepeti Sil butonuna tıklandı, modal bekleniyor...");
-  await sleep(page, 800);
+  await sleep(page, 3000);
   const okBtn = page.locator('[data-cy="modal-ok"], button[ng-click^="ok("]').first();
   const hasOk = await okBtn.waitFor({ state: "visible", timeout: timeoutMs }).then(() => true).catch(() => false);
   log(`Modal OK butonu bulundu: ${hasOk}`);
