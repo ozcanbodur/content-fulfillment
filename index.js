@@ -680,7 +680,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
   try {
     const result = await withTimeout(
       runBatch({ username, password, items, stopOnError, checkout }),
-      300000,
+      900000, // 15 dakika (önceki: 5 dk — checkout dahil tüm akış için yetersizdi)
       "BATCH_TIMEOUT"
     );
     result.usedUsername = username;
