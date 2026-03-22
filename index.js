@@ -597,7 +597,7 @@ async function runBatch({ username, password, items, stopOnError, checkout }) {
 
     const results = [];
     for (const it of items) {
-      const r = await withTimeout(addOneItem(page, it), 180000, "ITEM_TIMEOUT");
+      const r = await withTimeout(addOneItem(page, it), 300000, "ITEM_TIMEOUT"); // 5 dk (önceki: 3 dk — yetersizdi)
       results.push(r);
       if (!r.ok && stopOnError) break;
       await sleep(page, 1500);
@@ -680,7 +680,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
   try {
     const result = await withTimeout(
       runBatch({ username, password, items, stopOnError, checkout }),
-      900000, // 15 dakika (önceki: 5 dk — checkout dahil tüm akış için yetersizdi)
+      900000, // 15 dakika (önceki: 5 dk — yetersizdi)
       "BATCH_TIMEOUT"
     );
     result.usedUsername = username;
