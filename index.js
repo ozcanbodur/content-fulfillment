@@ -593,7 +593,7 @@ async function runBatch({ username, password, items, stopOnError, checkout }) {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return { ok: false, step: "login", ...loginResult };
 
-    await withTimeout(clearCartAfterLogin(page), 60000, "CLEAR_CART_TIMEOUT");
+    await clearCartAfterLogin(page); // timeout yok — eski davranış
 
     const results = [];
     for (const it of items) {
@@ -703,7 +703,7 @@ app.post("/add-to-cart", async (req, res) => {
   try {
     const loginResult = await withTimeout(login(page, username, password), 60000);
     if (!loginResult.loggedIn) return res.status(401).json({ ok: false, step: "login", ...loginResult });
-    await withTimeout(clearCartAfterLogin(page), 60000, "CLEAR_CART_TIMEOUT");
+    await clearCartAfterLogin(page); // timeout yok — eski davranış
     const itemResult = await withTimeout(addOneItem(page, { productCode, uom, qty }), 180000, "ITEM_TIMEOUT");
     let checkoutResult = null;
     if (checkout && itemResult.ok) checkoutResult = await withTimeout(checkoutDelivery(page, checkout), 180000, "CHECKOUT_TIMEOUT");
