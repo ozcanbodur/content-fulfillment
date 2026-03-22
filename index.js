@@ -605,7 +605,7 @@ async function checkoutDelivery(page, params) {
 // CORE BATCH LOGIC
 // =========================
 async function runBatch({ username, password, items, stopOnError, checkout }) {
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"] });
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000);
   page.setDefaultNavigationTimeout(60000);
@@ -650,7 +650,7 @@ async function runBatch({ username, password, items, stopOnError, checkout }) {
 // ✅ LOGIN TEST
 app.post("/login-test", async (req, res) => {
   const { username, password } = req.body || {};
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"] });
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000); page.setDefaultNavigationTimeout(60000);
   try {
@@ -717,7 +717,7 @@ app.post("/add-to-cart-batch", async (req, res) => {
 app.post("/add-to-cart", async (req, res) => {
   const { username, password, productCode, uom, qty, checkout } = req.body || {};
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"] });
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000); page.setDefaultNavigationTimeout(60000);
   try {
@@ -743,7 +743,7 @@ app.post("/add-to-cart", async (req, res) => {
 app.post("/debug-checkout-page", async (req, res) => {
   const { username, password, productCode, uom, qty, waitBefore = 10000 } = req.body || {};
   if (!username || !password) return res.status(400).json({ ok: false, error: "username/password zorunlu" });
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"] });
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
   const page = await browser.newPage();
   page.setDefaultTimeout(60000); page.setDefaultNavigationTimeout(60000);
   try {
