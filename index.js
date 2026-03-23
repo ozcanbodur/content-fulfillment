@@ -105,7 +105,7 @@ const ADDRESS_REGION = {
   "TEMAWORD":              "AVRUPA",
   "WELLDONE KANYON":       "AVRUPA",
   "NİŞANTAŞI":             "AVRUPA",
-  "MİDPOİNT  BEYOĞLU":    "AVRUPA",
+  "MİDPOİNT BEYOĞLU":    "AVRUPA",
 
   // === ASYA ===
   "SUADİYE MİDPOİNT":     "ASYA",
