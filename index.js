@@ -487,22 +487,11 @@ async function checkoutDelivery(page, params) {
       }
     }
     
-    // 4. HALA BULUNAMADIYSA KISMİ EŞLEŞMEYE GEÇ (SON ÇARE)
+    // 4. HİÇBİR EŞLEŞME BULUNAMADIYSA HATA — kısmi eşleşme kaldırıldı, yanlış adrese gitmez
     if ((await hitLink.count()) === 0) {
-      console.log(`⚠ Tam/başlangıç eşleşmesi bulunamadı, kısmi arama başlıyor...`);
-      for (const word of wanted.split(/[\s\-]+/).filter((w) => w.length > 3)) {
-        const wordEscaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        hitLink = addressLinks.filter({ hasText: new RegExp(wordEscaped, "i") }).first();
-        if ((await hitLink.count()) > 0) { 
-          console.log(`⚠ Kısmi eşleşme (riskli): "${word}"`); 
-          break; 
-        }
-      }
-    }
-    
-    // 5. HİÇBİR EŞLEŞME BULUNAMADIYSA HATA
-    if ((await hitLink.count()) === 0) {
-      return { ok: false, status: 404, error: `Adres bulunamadı: ${wanted}`, availableAddresses: allAddresses.map((x) => (x || "").trim()).filter(Boolean), ...result };
+      const cleanAddresses = allAddresses.map((x) => (x || "").trim()).filter(Boolean);
+      console.log(`❌ Adres bulunamadı: "${wanted}" | Sitedeki adresler:`, cleanAddresses);
+      return { ok: false, status: 404, error: `Adres bulunamadı: ${wanted}`, availableAddresses: cleanAddresses, ...result };
     }
     
     result.selectedAddress = (await hitLink.textContent().catch(() => "")).trim();
