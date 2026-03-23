@@ -148,7 +148,7 @@ function withTimeout(promise, ms, label = "FLOW_TIMEOUT") {
   ]);
 }
 
-const WAIT_STEP_MS = 10000;
+const WAIT_STEP_MS = 3000; // eskiden 10sn — 3sn yaptık
 const BASE_URL = "https://www.mybidfood.com.tr";
 
 async function sleep(page, ms) {
@@ -241,7 +241,8 @@ async function addOneItem(page, item) {
 
   await page.goto(productUrl, { waitUntil: "domcontentloaded" });
   await sleep(page, 2000);
-  await sleep(page, WAIT_STEP_MS);
+  // Sabit bekleme yerine element yüklenene kadar bekle (max 30sn)
+  await page.waitForSelector(`#product-list-${productCode}`, { timeout: 30000 }).catch(() => {});
 
   const row = page.locator(`#product-list-${productCode}`).first();
   if ((await row.count()) === 0) return { ok: false, status: 404, productCode, uom, error: `Ürün bloğu yok: ${productCode}`, productUrl };
