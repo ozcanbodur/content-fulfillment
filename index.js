@@ -461,16 +461,50 @@ async function checkoutDelivery(page, params) {
     await sleep(page, 1000);
     const addressLinks = page.locator('a[data-cy="click-switch-addressaccount-address"]');
     const allAddresses = await addressLinks.allTextContents().catch(() => []);
-    let hitLink = addressLinks.filter({ hasText: new RegExp(wanted, "i") }).first();
+    
+    // Regex için özel karakterleri escape et
+    const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    // 1. ÖNCE TAM EŞLEŞME DENE (örn: "TEMAWORD" tam olarak eşleşsin)
+    let hitLink = addressLinks.filter({ hasText: new RegExp(`^${escaped}$`, "i") }).first();
+    if ((await hitLink.count()) > 0) {
+      console.log(`✓ Tam eşleşme bulundu: "${wanted}"`);
+    }
+    
+    // 2. TAM EŞLEŞME YOKSA BAŞLANGIÇ EŞLEŞMESI DENE (örn: "TEMAWORD -" ile başlayan)
     if ((await hitLink.count()) === 0) {
-      for (const word of wanted.split(/[\s\-]+/).filter((w) => w.length > 3)) {
-        hitLink = addressLinks.filter({ hasText: new RegExp(word, "i") }).first();
-        if ((await hitLink.count()) > 0) { console.log(`Kısmi eşleşme: "${word}"`); break; }
+      hitLink = addressLinks.filter({ hasText: new RegExp(`^${escaped}\\s*[-,]`, "i") }).first();
+      if ((await hitLink.count()) > 0) {
+        console.log(`✓ Başlangıç eşleşmesi bulundu: "${wanted} -" veya "${wanted},"`);
       }
     }
+    
+    // 3. HALA BULUNAMADIYSA BAŞLANGIÇ EŞLEŞMESI (tire/virgül olmadan)
+    if ((await hitLink.count()) === 0) {
+      hitLink = addressLinks.filter({ hasText: new RegExp(`^${escaped}\\s`, "i") }).first();
+      if ((await hitLink.count()) > 0) {
+        console.log(`✓ Başlangıç eşleşmesi bulundu (boşlukla): "${wanted} "`);
+      }
+    }
+    
+    // 4. HALA BULUNAMADIYSA KISMİ EŞLEŞMEYE GEÇ (SON ÇARE)
+    if ((await hitLink.count()) === 0) {
+      console.log(`⚠ Tam/başlangıç eşleşmesi bulunamadı, kısmi arama başlıyor...`);
+      for (const word of wanted.split(/[\s\-]+/).filter((w) => w.length > 3)) {
+        const wordEscaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        hitLink = addressLinks.filter({ hasText: new RegExp(wordEscaped, "i") }).first();
+        if ((await hitLink.count()) > 0) { 
+          console.log(`⚠ Kısmi eşleşme (riskli): "${word}"`); 
+          break; 
+        }
+      }
+    }
+    
+    // 5. HİÇBİR EŞLEŞME BULUNAMADIYSA HATA
     if ((await hitLink.count()) === 0) {
       return { ok: false, status: 404, error: `Adres bulunamadı: ${wanted}`, availableAddresses: allAddresses.map((x) => (x || "").trim()).filter(Boolean), ...result };
     }
+    
     result.selectedAddress = (await hitLink.textContent().catch(() => "")).trim();
     await hitLink.scrollIntoViewIfNeeded().catch(() => {});
     await hitLink.click();
