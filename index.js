@@ -109,6 +109,7 @@ const ADDRESS_REGION = {
 
   // === ASYA ===
   "SUADİYE MİDPOİNT":     "ASYA",
+  "SUADİYE":     "ASYA",
   "KIRINTI HILLTOWN 153":  "ASYA",
   "KIRINTI ERENKÖY":       "ASYA",
   "METROPOL":              "ASYA",
